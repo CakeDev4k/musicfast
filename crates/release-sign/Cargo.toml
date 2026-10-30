@@ -1,0 +1,12 @@
+[package]
+name = "release-sign"
+description = "Gera a chave Ed25519 das atualizações e assina o checksums.txt de cada release (o que o fastframe-update confere antes de instalar)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# O mesmo Ed25519 que o fastframe-update usa para conferir.
+ring = "0.17"

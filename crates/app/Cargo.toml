@@ -1,0 +1,56 @@
+[package]
+name = "musicfast"
+description = "MusicFast: YouTube Music nativo e rápido, em egui."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "musicfast"
+path = "src/main.rs"
+
+[dependencies]
+musicfast-ytm = { path = "../ytm" }
+musicfast-player = { path = "../player" }
+egui.workspace = true
+eframe.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+fastframe-fonts.workspace = true
+fastframe-text.workspace = true
+fastframe-log.workspace = true
+fastframe-instance.workspace = true
+fastframe-now-playing.workspace = true
+fastframe-scroll.workspace = true
+fastframe-update.workspace = true
+# O erro do `Transport` do fastframe-update.
+anyhow = "1"
+# Capas: só JPEG, PNG e WebP, decodificadas fora da thread da interface.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# A janela de login do Google (um processo à parte, `--entrar`): o navegador
+# embutido do sistema (WebView2, WKWebView, WebKitGTK) abre a página de login
+# de verdade e devolve os cookies da conta.
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+tao = { version = "0.37", default-features = false, features = ["rwh_06"] }
+
+[target.'cfg(windows)'.dependencies]
+# Os cookies da conta ficam cifrados pelo DPAPI (só este usuário do Windows lê).
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Graphics_Dwm"] }
+# O HWND da janela, para arredondar os cantos do mini player (DWM).
+raw-window-handle = "0.6"
+
+# Os cookies da conta no Chaveiro do macOS e no Secret Service do Linux
+# (GNOME Keyring, KWallet). O zbus, em Rust puro, fala com o D-Bus: sem
+# libdbus para instalar.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "async-io", "crypto-rust"] }
+
+[build-dependencies]
+# O ícone do .exe.
+winresource = "0.1"

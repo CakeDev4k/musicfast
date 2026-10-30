@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = ["crates/ytm", "crates/player", "crates/app", "crates/release-sign"]
+default-members = ["crates/ytm", "crates/player", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/CakeDev4k/musicfast"
+
+[workspace.dependencies]
+egui = "0.36"
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "persistence"] }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# TLS do Windows (SChannel), não o rustls: o padrão traz o aws-lc, C pesado no
+# binário e na compilação, e o do sistema já está atualizado pelo Windows
+# Update (mesma escolha do prime-services).
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "blocking", "json", "http2"] }
+# A mesma tag de fastframe do Produtividade Prime: o Cargo já tem o checkout.
+# Mova todos juntos e leia as notas da release antes.
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-instance = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-audio = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+# Atualização automática pelas releases do GitHub (assinadas com Ed25519).
+fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# "unwind", não "abort": o que mais pode quebrar (o JSON do YouTube que mudou
+# de forma, uma capa malformada) roda em threads de trabalho, e com "abort"
+# qualquer pânico nelas fechava o app inteiro. Com "unwind" a thread morre
+# sozinha, `jobs` e `covers` a pegam com `catch_unwind` e a tela mostra o
+# erro. Custa ~5% no tamanho do .exe (DOCUMENTACAO_PERFORMANCE.md §1).
+panic = "unwind"
+
+# Interface em modo imediato sem otimização é lenta demais para avaliar; as
+# dependências compilam otimizadas (o AAC também: decodificar em debug custa
+# 20x) e o código do app continua incremental.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Os forks de egui e winit que Spotifast, ZapFast e o fastframe usam (README do
+# fastframe, "egui and winit forks"): no Windows trazem o fim do loop ocupado
+# esperando repaint, o fallback para OpenGL antigo e o tamanho de janela que
+# sobrevive ao zoom. O Cargo só aplica [patch] na raiz. Mova egui e winit juntos.
+[patch.crates-io]
+ecolor = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+eframe = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui-winit = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui_glow = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+emath = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+winit = { git = "https://github.com/crmne/winit", rev = "ed7caa9023f10b397f5b6ec8284a840cbd8a6f65" }

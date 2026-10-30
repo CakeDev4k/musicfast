@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MusicFast
+GenericName=Music Player
+Comment=YouTube Music nativo e rápido
+Exec=@EXEC@ %U
+Icon=musicfast
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;youtube;player;
+StartupWMClass=com.threshold.musicfast

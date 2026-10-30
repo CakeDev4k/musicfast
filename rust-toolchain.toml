@@ -1,0 +1,5 @@
+# O fastframe exige Rust 1.98. Fixado aqui, e só aqui: o `stable` desta
+# máquina segue no 1.94 para os outros projetos.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]

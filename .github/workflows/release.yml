@@ -1,0 +1,211 @@
+# Uma release por tag `v<versão>` (a mesma do Cargo.toml):
+#
+#   git tag v0.1.1 && git push origin v0.1.1
+#
+# Compila para Windows, Linux (x86_64 e ARM) e macOS (universal), empacota
+# no formato que o `fastframe-update` espera, escreve o `checksums.txt`,
+# assina-o com a chave do segredo MUSICFAST_SIGNING_KEY e publica a release.
+# Os apps instalados acham a versão nova em até um dia e se atualizam.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag existente a (re)publicar, por exemplo v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  version:
+    name: Conferir a versão
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - id: v
+        name: A tag bate com o Cargo.toml
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::A tag $TAG não bate com a versão $version do Cargo.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Windows
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Compilar
+        run: cargo build --release --locked -p musicfast
+      - name: Empacotar
+        shell: bash
+        run: |
+          name="musicfast-v${VERSION}-x86_64-pc-windows-msvc"
+          mkdir -p "dist/$name"
+          cp target/release/musicfast.exe "dist/$name/"
+          cp packaging/musicfast-portable.txt LICENSE README.md "dist/$name/"
+          cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null
+          ./"$name"/musicfast.exe --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-22.04
+          - arch: aarch64
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libasound2-dev \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libxkbcommon-dev libgl1-mesa-dev
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Compilar
+        run: cargo build --release --locked -p musicfast
+      - name: Empacotar
+        run: |
+          name="musicfast-v${VERSION}-${{ matrix.arch }}-unknown-linux-gnu"
+          mkdir -p "dist/$name" icons
+          cp target/release/musicfast "dist/$name/"
+          cp packaging/musicfast-portable.txt LICENSE README.md "dist/$name/"
+          cp packaging/linux/musicfast.desktop packaging/linux/install.sh "dist/$name/"
+          chmod +x "dist/$name/musicfast" "dist/$name/install.sh"
+          target/release/musicfast --exportar-icone icons
+          cp icons/musicfast-256.png "dist/$name/musicfast.png"
+          test "$(target/release/musicfast --version)" = "musicfast ${VERSION}"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  macos:
+    name: macOS (universal)
+    needs: version
+    runs-on: macos-14
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Compilar (Apple silicon e Intel)
+        run: |
+          cargo build --release --locked -p musicfast --target aarch64-apple-darwin
+          cargo build --release --locked -p musicfast --target x86_64-apple-darwin
+      - name: Montar o MusicFast.app
+        run: |
+          app=dist/MusicFast.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" icons musicfast.iconset
+          lipo -create -output "$app/Contents/MacOS/musicfast" \
+            target/aarch64-apple-darwin/release/musicfast \
+            target/x86_64-apple-darwin/release/musicfast
+          sed "s/@VERSION@/${VERSION}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          "$app/Contents/MacOS/musicfast" --exportar-icone icons
+          for s in 16 32 128 256 512; do
+            cp "icons/musicfast-$s.png" "musicfast.iconset/icon_${s}x${s}.png"
+            cp "icons/musicfast-$((s * 2)).png" "musicfast.iconset/icon_${s}x${s}@2x.png"
+          done
+          iconutil -c icns musicfast.iconset -o "$app/Contents/Resources/musicfast.icns"
+          # Sem conta Apple Developer: assinatura ad hoc (o Apple silicon
+          # não abre binário sem nenhuma assinatura).
+          codesign --force --deep --sign - "$app"
+          test "$("$app/Contents/MacOS/musicfast" --version)" = "musicfast ${VERSION}"
+      - name: Criar o .dmg
+        run: |
+          mkdir -p dmg
+          cp -R dist/MusicFast.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname MusicFast -srcfolder dmg -ov -format UDZO "dist/musicfast-v${VERSION}-macos-universal.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+
+  publish:
+    name: Publicar a release
+    needs: [version, windows, linux, macos]
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Checksums assinados
+        env:
+          MUSICFAST_SIGNING_KEY: ${{ secrets.MUSICFAST_SIGNING_KEY }}
+        run: |
+          if [ -z "$MUSICFAST_SIGNING_KEY" ]; then
+            echo "::error::Falta o segredo MUSICFAST_SIGNING_KEY: sem ele os apps recusam a atualização."
+            exit 1
+          fi
+          cd artifacts
+          sha256sum -- * > checksums.txt
+          cat checksums.txt
+          cd ..
+          cargo run --release --locked -p release-sign -- sign artifacts/checksums.txt
+          cargo run --release --locked -p release-sign -- verify artifacts/checksums.txt crates/app/update-public-key.hex
+      - name: Notas da release
+        run: |
+          notes="packaging/release-notes/v${VERSION}.md"
+          if [ -f "$notes" ]; then cp "$notes" notes.md; else echo "MusicFast ${VERSION}" > notes.md; fi
+          cat packaging/release-notes/instalar.md >> notes.md
+      - name: Publicar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* --title "MusicFast ${VERSION}" --notes-file notes.md
+          fi

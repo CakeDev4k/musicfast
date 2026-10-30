@@ -1,0 +1,15 @@
+[package]
+name = "musicfast-ytm"
+description = "O catálogo do YouTube Music pela API interna do site (InnerTube, cliente WEB_REMIX): busca, início, álbum, artista, playlist, fila de rádio e letra."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+log.workspace = true
+# O cabeçalho SAPISIDHASH das chamadas com conta (o mesmo que o site manda).
+sha1 = "0.10"

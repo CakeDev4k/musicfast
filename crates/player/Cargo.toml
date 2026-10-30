@@ -1,0 +1,33 @@
+[package]
+name = "musicfast-player"
+description = "Tocar: o yt-dlp resolve o endereço do áudio, o reqwest baixa, o Symphonia decodifica o AAC e o fastframe-audio toca. Fila, rádio e pré-carga da próxima."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+musicfast-ytm = { path = "../ytm" }
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+fastframe-audio.workspace = true
+# Só o AAC dentro de MP4 (o formato 140 do YouTube, 128 kbps, 44,1 kHz):
+# decodifica a música inteira em ~140 ms, em Rust puro, sem ffmpeg.
+symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4"] }
+# A fila sem trava entre o decodificador e o callback de áudio, que não pode
+# esperar ninguém (README do fastframe-audio).
+rtrb = "0.3"
+# Instalar o yt-dlp: o zip oficial conferido pelo SHA2-256SUMS da release.
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_Security",
+] }

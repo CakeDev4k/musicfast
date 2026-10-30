@@ -1,0 +1,7 @@
+/target
+/dist
+# A chave privada das releases nunca entra no repositório.
+*signing-key*.hex
+*.log
+.DS_Store
+Thumbs.db

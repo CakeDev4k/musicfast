@@ -1,0 +1,1358 @@
+//! A janela: junta o catálogo, o player, as capas e as telas, aplica o que
+//! a pessoa pediu e guarda a sessão.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
+
+use egui::{Align2, CornerRadius, Frame, Key, Modifiers, PointerButton, Sense, Ui, ViewportCommand, vec2};
+use fastframe_instance::Guard;
+use fastframe_now_playing as np;
+use musicfast_player::{Command, Config, Player, Repeat, Snapshot, Status};
+use musicfast_ytm::{Auth, Client, LikeStatus, Session};
+
+use crate::Wake;
+use crate::covers::Covers;
+use crate::jobs::{Jobs, Refresh, Reply};
+use crate::paths::Paths;
+use crate::state::{Saved, unix_now};
+use crate::ui::bar::{self, BarState};
+use crate::ui::nav::{self, SearchBox};
+use crate::ui::player::{self, Tab};
+use crate::ui::side::{self, LyricsState};
+use crate::ui::{Action, Cx, Dialog, Me, PageState, Side, View, dialog, kit, mini, page, play_command, theme};
+
+/// O mini player aberto.
+struct Mini {
+    lyrics: bool,
+    /// A janela estava maximizada antes: volta maximizada.
+    was_maximized: bool,
+}
+
+/// O que a fila do YouTube diz da música atual.
+struct TrackInfo {
+    /// A resposta chegou (a entrada vazia é posta no pedido).
+    answered: bool,
+    lyrics_id: Option<String>,
+    related_id: Option<String>,
+}
+
+pub struct Startup {
+    pub paths: Paths,
+    pub saved: Saved,
+    pub wake: Arc<Wake>,
+    pub instance: Guard,
+    /// O app acabou de ser atualizado: confirmar ao ajudante que abriu.
+    pub update_receipt: Option<fastframe_update::Receipt>,
+    /// A atualização não abriu e o ajudante voltou a versão anterior.
+    pub update_error: Option<String>,
+}
+
+pub struct MusicApp {
+    paths: Paths,
+    wake: Arc<Wake>,
+    _instance: Guard,
+    client: Arc<Client>,
+    player: Player,
+    jobs: Jobs,
+    replies: Receiver<Reply>,
+    covers: Covers,
+
+    snap: Snapshot,
+    snap_rev: u64,
+    history: Vec<View>,
+    at: usize,
+    pages: HashMap<View, PageState>,
+    search: SearchBox,
+    side: Option<Side>,
+    sidebar_mini: bool,
+    sidebar_width: f32,
+    /// O mini player, enquanto a janela é ele.
+    mini: Option<Mini>,
+    mini_anchor: Option<[f32; 2]>,
+    /// Os cantos da janela a acertar no próximo quadro (redondos no mini).
+    round_corners: Option<bool>,
+    /// A última posição e tamanho com a janela normal (`state::WindowGeom`).
+    window: Option<crate::state::WindowGeom>,
+    lyrics: HashMap<String, LyricsState>,
+    info: HashMap<String, TrackInfo>,
+    related: HashMap<String, PageState>,
+    bar: BarState,
+    warmed: Option<String>,
+    me: Me,
+    dialog: Option<Dialog>,
+    expanded: bool,
+    player_tab: Tab,
+    /// A renovação silenciosa da sessão já foi tentada desde a última
+    /// conferência boa (uma por vencimento, para não girar em falso).
+    renew_tried: bool,
+    /// A última conferência da conta: o app fica aberto dias, e a sessão
+    /// pode vencer no meio.
+    account_checked: Instant,
+    /// A música já contada no histórico da conta.
+    history_for: Option<String>,
+    toast: Option<(String, f64)>,
+    last_notice: u64,
+
+    controls: Option<np::NowPlaying>,
+    /// A capa da música atual em disco, e para qual música foi pedida.
+    art: Option<(String, PathBuf)>,
+    art_for: Option<String>,
+    last_position: (f64, Instant),
+    /// O que os controles de mídia receberam por último: a revisão do
+    /// `Snapshot`, se já tinha a capa, e quando.
+    controls_sent: (u64, bool, Instant),
+    title_for: Option<String>,
+
+    /// A última sessão gravada, sem a fila (ela fica em `saved_queue`, por
+    /// ponteiro: a comparação não copia 2.000 músicas).
+    saved: Saved,
+    saved_queue: Arc<Vec<musicfast_ytm::Track>>,
+    saved_at: Instant,
+    scrolling: fastframe_scroll::Scrolling,
+    first_frame_logged: bool,
+    updates: crate::update::Updates,
+    /// Quando perguntar de novo se saiu versão nova.
+    next_update_check: Instant,
+    update_receipt: Option<fastframe_update::Receipt>,
+    toast_on_start: Option<String>,
+}
+
+impl MusicApp {
+    pub fn new(ctx: &egui::Context, startup: Startup) -> Self {
+        let Startup { paths, saved, wake, instance, update_receipt, update_error } = startup;
+        let client = Arc::new(Client::new("pt", "BR").expect("cliente HTTP"));
+        client.set_visitor(saved.visitor.clone());
+        if let Some(version) = &saved.client_version {
+            client.set_version(version);
+        }
+        let http = Arc::new(
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .connect_timeout(Duration::from_secs(6))
+                .pool_idle_timeout(Duration::from_secs(90))
+                .build()
+                .expect("cliente HTTP"),
+        );
+        let repaint = ctx.clone();
+        let player = Player::start(
+            Config {
+                bin_dir: paths.bin.clone(),
+                cache_file: paths.resolved.clone(),
+                client: client.clone(),
+                volume: saved.volume,
+            },
+            Arc::new(move || repaint.request_repaint()),
+        );
+        // A conta vai antes da fila restaurada: a música dela já é pedida
+        // como a conta (256 kbps no Premium).
+        let session_cookie = crate::vault::load(&paths.session).filter(|c| Auth::from_cookie_header(c).is_some());
+        player.send(Command::SetAccount(session_cookie.clone()));
+        player.send(Command::SetShuffle(saved.shuffle));
+        player.send(Command::SetRepeat(saved.repeat));
+        if !saved.queue.is_empty() {
+            let index = saved.index.unwrap_or(0).min(saved.queue.len() - 1);
+            player.send(Command::Restore { tracks: saved.queue.clone(), index, position: saved.position });
+        }
+        let (jobs, replies) = Jobs::new(client.clone(), http.clone(), ctx.clone());
+        // A versão do cliente muda a cada poucos dias; a padrão vale por
+        // meses, então a leitura fica em segundo plano e uma vez por dia.
+        if unix_now().saturating_sub(saved.version_checked) > 24 * 3600 {
+            jobs.refresh_version();
+        }
+        // A sessão da conta, se houver: as chamadas já saem logadas, e a
+        // conferência (`account`) diz se ela ainda vale.
+        let mut me = Me::default();
+        if let Some(auth) = session_cookie.as_deref().and_then(Auth::from_cookie_header) {
+            client.set_auth(Some(auth));
+            me.signed_in = true;
+            jobs.account();
+            jobs.playlists();
+        }
+        jobs.load(View::Home);
+        let waker = ctx.clone();
+        let controls = np::NowPlaying::start(np::App::new("musicfast", "MusicFast"), move || waker.request_repaint());
+        Self {
+            covers: Covers::new(ctx, http),
+            wake,
+            _instance: instance,
+            client,
+            player,
+            jobs,
+            replies,
+            snap: Snapshot::default(),
+            snap_rev: u64::MAX,
+            history: vec![View::Home],
+            at: 0,
+            pages: HashMap::from([(View::Home, PageState::default())]),
+            search: SearchBox::default(),
+            side: saved.side.as_deref().and_then(Side::from_key),
+            sidebar_mini: saved.sidebar_mini,
+            sidebar_width: nav::sidebar_width(saved.sidebar_width),
+            mini: None,
+            mini_anchor: saved.mini_anchor,
+            round_corners: None,
+            window: saved.window.filter(crate::state::WindowGeom::is_sane),
+            lyrics: HashMap::new(),
+            bar: BarState { seeking: None, unmuted: saved.volume.max(0.1) },
+            warmed: None,
+            toast: None,
+            last_notice: 0,
+            controls: Some(controls),
+            info: HashMap::new(),
+            related: HashMap::new(),
+            me,
+            dialog: None,
+            expanded: false,
+            player_tab: Tab::default(),
+            history_for: None,
+            renew_tried: false,
+            account_checked: Instant::now(),
+            art: None,
+            art_for: None,
+            last_position: (0.0, Instant::now()),
+            controls_sent: (u64::MAX, false, Instant::now()),
+            title_for: None,
+            saved: Saved { queue: Vec::new(), ..saved },
+            saved_queue: Arc::new(Vec::new()),
+            saved_at: Instant::now(),
+            scrolling: fastframe_scroll::Scrolling::default(),
+            first_frame_logged: false,
+            updates: crate::update::Updates::new(ctx),
+            // Uns segundos depois de abrir: o primeiro quadro e a música vêm antes.
+            next_update_check: Instant::now() + Duration::from_secs(8),
+            update_receipt,
+            toast_on_start: update_error,
+            paths,
+        }
+    }
+
+    fn view(&self) -> &View {
+        &self.history[self.at]
+    }
+
+    fn ensure_loaded(&mut self, view: &View) {
+        let needs = self.pages.get(view).is_none_or(|s| s.page.is_none() && s.error.is_some());
+        if needs {
+            self.pages.insert(view.clone(), PageState::default());
+            self.jobs.load(view.clone());
+        }
+    }
+
+    fn open(&mut self, view: View) {
+        if let View::Search { query, .. } = &view {
+            self.search.text = query.clone();
+            // Uma busca refeita traz o resultado de agora.
+            if *self.view() != view {
+                self.pages.remove(&view);
+            }
+        }
+        if *self.view() == view {
+            return;
+        }
+        self.history.truncate(self.at + 1);
+        self.history.push(view.clone());
+        self.at = self.history.len() - 1;
+        // O histórico não cresce sem fim; as páginas de fora dele saem.
+        if self.history.len() > 60 {
+            self.history.remove(0);
+            self.at -= 1;
+        }
+        self.pages.retain(|v, _| self.history.contains(v));
+        self.ensure_loaded(&view);
+    }
+
+    fn go(&mut self, to: usize) {
+        if to < self.history.len() && to != self.at {
+            self.at = to;
+            let view = self.view().clone();
+            if let View::Search { query, .. } = &view {
+                self.search.text = query.clone();
+            }
+            self.ensure_loaded(&view);
+        }
+    }
+
+    fn apply(&mut self, ctx: &egui::Context, action: Action) {
+        match action {
+            Action::Open(view) => self.open(view),
+            Action::Back => self.go(self.at.saturating_sub(1)),
+            Action::Forward => self.go(self.at + 1),
+            Action::Reload => {
+                let view = self.view().clone();
+                self.pages.insert(view.clone(), PageState::default());
+                self.jobs.load(view);
+            }
+            Action::Cmd(cmd) => self.player.send(cmd),
+            Action::Play(play, seed) => match play_command(&play, seed) {
+                Some(cmd) => self.player.send(cmd),
+                None => self.say(ctx, "Nada para tocar aqui."),
+            },
+            Action::Warm(video_id) => {
+                if self.warmed.as_deref() != Some(&video_id) {
+                    self.player.send(Command::Warm(video_id.clone()));
+                    self.warmed = Some(video_id);
+                }
+            }
+            Action::MoreSections => {
+                let view = self.view().clone();
+                if let Some(state) = self.pages.get_mut(&view)
+                    && state.loading_more.is_none()
+                    && let Some(token) = state.page.as_ref().and_then(|p| p.continuation.clone())
+                {
+                    state.loading_more = Some(None);
+                    self.jobs.more_sections(view, token);
+                }
+            }
+            Action::MoreItems(shelf) => {
+                let view = self.view().clone();
+                if let Some(state) = self.pages.get_mut(&view)
+                    && state.loading_more.is_none()
+                    && let Some(token) = state.page.as_ref().and_then(|p| p.shelves.get(shelf)).and_then(|s| s.continuation.clone())
+                {
+                    state.loading_more = Some(Some(shelf));
+                    self.jobs.more_items(view, shelf, token);
+                }
+            }
+            Action::ToggleSidebar => self.sidebar_mini = !self.sidebar_mini,
+            Action::ToggleSide(which) => {
+                self.side = if self.side == Some(which) { None } else { Some(which) };
+                self.expanded = false;
+            }
+            Action::Expand(on) => self.expanded = on && self.snap.current().is_some(),
+            Action::Mini(true) => self.enter_mini(ctx),
+            Action::Mini(false) => self.leave_mini(ctx),
+            Action::SignIn => {
+                self.me.signing_in = true;
+                self.jobs.sign_in(false);
+                self.say(ctx, "Entre na sua conta na janela do Google.");
+            }
+            Action::SignOut => self.sign_out(ctx, "Você saiu da conta."),
+            Action::SubmitCookies(cookie) => self.start_session(ctx, &cookie, false),
+            Action::RestartToUpdate => match self.updates.restart() {
+                Ok(true) => {
+                    log::info!("fechando para atualizar");
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("atualização: {error}");
+                    self.say(ctx, "Não deu para instalar a atualização agora. Tente de novo mais tarde.");
+                }
+            },
+            Action::Dialog(d) => self.dialog = Some(d),
+            Action::Rate(video_id, status) => {
+                self.me.likes.insert(video_id.clone(), status);
+                let message = match status {
+                    LikeStatus::Like => "Adicionada às músicas curtidas",
+                    LikeStatus::Dislike => "Obrigado pelo feedback",
+                    LikeStatus::Indifferent => "Removida das músicas curtidas",
+                };
+                let refresh = Refresh::Page(View::browse("VLLM", None));
+                self.jobs.act(message, refresh, move |c| c.rate_song(&video_id, status));
+            }
+            Action::SaveCollection(playlist_id, on) => {
+                self.me.saved.insert(playlist_id.clone(), on);
+                let message = if on { "Salvo na biblioteca" } else { "Removido da biblioteca" };
+                self.jobs.act(message, Refresh::Playlists, move |c| c.rate_playlist(&playlist_id, on));
+            }
+            Action::Subscribe(channel, on) => {
+                self.me.subscribed.insert(channel.clone(), on);
+                let message = if on { "Inscrição feita" } else { "Inscrição cancelada" };
+                self.jobs.act(message, Refresh::Nothing, move |c| c.subscribe(&channel, on));
+            }
+            Action::AddToPlaylist { playlist_id, title, video_id } => {
+                let refresh = Refresh::Page(View::browse(&playlist_id, None));
+                self.jobs.act(format!("Salva em {title}"), refresh, move |c| c.add_to_playlist(&playlist_id, &video_id));
+            }
+            Action::CreatePlaylist { title, privacy, video_id } => {
+                let videos: Vec<String> = video_id.into_iter().collect();
+                let message = format!("Playlist \"{title}\" criada");
+                self.jobs.act(message, Refresh::Playlists, move |c| c.create_playlist(&title, privacy, &videos).map(|_| ()));
+            }
+        }
+    }
+
+    /// Entra com os cookies (da janela de login ou colados) e refaz o que
+    /// muda com a conta: início, biblioteca, playlists.
+    /// `quiet`: a renovação silenciosa, que não avisa nada a ninguém.
+    fn start_session(&mut self, ctx: &egui::Context, cookie: &str, quiet: bool) {
+        self.me.signing_in = false;
+        let Some(auth) = Auth::from_cookie_header(cookie) else {
+            self.say(ctx, "Não deu para entrar: a sessão não veio.");
+            return;
+        };
+        self.client.set_auth(Some(auth));
+        self.player.send(Command::SetAccount(Some(cookie.to_owned())));
+        crate::vault::save(&self.paths.session, cookie);
+        self.me.signed_in = true;
+        self.jobs.account();
+        self.jobs.playlists();
+        self.account_checked = Instant::now();
+        self.reload_all();
+        if !quiet {
+            self.say(ctx, "Conectado à sua conta.");
+        }
+    }
+
+    /// Sair de verdade: esquece também o perfil do login, e a próxima
+    /// entrada pede a conta de novo.
+    fn sign_out(&mut self, ctx: &egui::Context, message: &str) {
+        let profile = self.paths.webview.clone();
+        let _ = std::thread::Builder::new().name("sair".into()).spawn(move || crate::login::forget(&profile));
+        self.drop_session(ctx, message);
+    }
+
+    /// A sessão venceu e a renovação não deu: sai, mas guarda o perfil do
+    /// login (entrar de novo costuma ser só escolher a conta).
+    fn drop_session(&mut self, ctx: &egui::Context, message: &str) {
+        self.client.set_auth(None);
+        self.player.send(Command::SetAccount(None));
+        crate::vault::clear(&self.paths.session);
+        self.me = Me::default();
+        if self.view().needs_account() {
+            self.history = vec![View::Home];
+            self.at = 0;
+        }
+        self.reload_all();
+        self.say(ctx, message);
+    }
+
+    /// Esquece as páginas carregadas (elas mudam com a conta) e recarrega a
+    /// atual.
+    fn reload_all(&mut self) {
+        self.pages.clear();
+        self.related.clear();
+        self.info.clear();
+        let view = self.view().clone();
+        self.ensure_loaded(&view);
+    }
+
+    fn say(&mut self, ctx: &egui::Context, text: &str) {
+        let now = ctx.input(|i| i.time);
+        self.toast = Some((text.to_owned(), now + 4.5));
+    }
+
+    fn handle_replies(&mut self, ctx: &egui::Context) {
+        while let Ok(reply) = self.replies.try_recv() {
+            match reply {
+                Reply::Page { view, result } => {
+                    let state = self.pages.entry(view).or_default();
+                    match result {
+                        Ok(page) => {
+                            state.page = Some(Arc::new(page));
+                            state.error = None;
+                        }
+                        Err(error) => {
+                            log::warn!("página: {error}");
+                            state.error = Some(error);
+                        }
+                    }
+                }
+                Reply::More { view, shelf, result } => {
+                    let Some(state) = self.pages.get_mut(&view) else { continue };
+                    state.loading_more = None;
+                    let Some(page) = state.page.as_mut() else { continue };
+                    let page = Arc::make_mut(page);
+                    match (result, shelf) {
+                        (Ok(more), None) => {
+                            page.shelves.extend(more.shelves);
+                            page.continuation = more.continuation;
+                        }
+                        (Ok(more), Some(si)) => {
+                            if let Some(target) = page.shelves.get_mut(si) {
+                                match more.shelves.into_iter().next() {
+                                    Some(s) if !s.items.is_empty() => {
+                                        target.items.extend(s.items);
+                                        target.continuation = s.continuation;
+                                    }
+                                    _ => target.continuation = None,
+                                }
+                            }
+                        }
+                        (Err(error), si) => {
+                            // Sem repetir sem fim: a continuação some.
+                            log::warn!("mais itens: {error}");
+                            match si {
+                                None => page.continuation = None,
+                                Some(si) => {
+                                    if let Some(s) = page.shelves.get_mut(si) {
+                                        s.continuation = None;
+                                    }
+                                }
+                            }
+                            self.say(ctx, "Não deu para carregar mais.");
+                        }
+                    }
+                }
+                Reply::Suggestions { input, result } => {
+                    if input == self.search.requested_for {
+                        self.search.suggestions = result;
+                        self.search.suggested_for = input;
+                        self.search.selected = None;
+                    }
+                }
+                Reply::Lyrics { video_id, result } => {
+                    let state = match result {
+                        Ok(lyrics) => LyricsState::Ready(lyrics),
+                        Err(error) => LyricsState::Failed(error),
+                    };
+                    self.lyrics.insert(video_id, state);
+                }
+                Reply::Art { video_id, path } => {
+                    if self.snap.current().is_some_and(|t| t.video_id == video_id) && path.exists() {
+                        self.art = Some((video_id, path));
+                    }
+                }
+                Reply::Version(version) => {
+                    self.saved.version_checked = unix_now();
+                    if !version.is_empty() {
+                        log::info!("cliente WEB_REMIX {version}");
+                        self.saved.client_version = Some(version);
+                    }
+                }
+                Reply::TrackInfo { video_id, result } => match result {
+                    Ok(watch) => {
+                        if let Some(like) = watch.like {
+                            // A escolha feita aqui vale mais que a resposta.
+                            self.me.likes.entry(video_id.clone()).or_insert(like);
+                        }
+                        self.info.insert(video_id, TrackInfo { answered: true, lyrics_id: watch.lyrics_id, related_id: watch.related_id });
+                    }
+                    Err(error) => {
+                        log::info!("dados da música: {error}");
+                        self.info.insert(video_id, TrackInfo { answered: true, lyrics_id: None, related_id: None });
+                    }
+                },
+                Reply::Related { video_id, result } => {
+                    let state = match result {
+                        Ok(page) => PageState { page: Some(Arc::new(page)), ..PageState::default() },
+                        Err(error) => PageState { error: Some(error), ..PageState::default() },
+                    };
+                    self.related.insert(video_id, state);
+                }
+                Reply::Login { silent: true, result } => match result {
+                    Ok(Some(cookie)) => {
+                        log::info!("sessão renovada sem janela");
+                        self.start_session(ctx, &cookie, true);
+                    }
+                    Ok(None) => self.drop_session(ctx, "Sua sessão expirou. Entre de novo."),
+                    Err(error) => {
+                        log::warn!("renovação da sessão: {error}");
+                        self.drop_session(ctx, "Sua sessão expirou. Entre de novo.");
+                    }
+                },
+                Reply::Login { silent: false, result } => {
+                    self.me.signing_in = false;
+                    match result {
+                        Ok(Some(cookie)) => self.start_session(ctx, &cookie, false),
+                        Ok(None) => self.say(ctx, "Login cancelado."),
+                        Err(error) => {
+                            log::warn!("login: {error}");
+                            self.say(ctx, "A janela de login não abriu. Tente entrar com os cookies do navegador.");
+                        }
+                    }
+                }
+                Reply::Account(result) => match result {
+                    Ok(Session::Active(account)) => {
+                        log::info!("conta conectada");
+                        self.me.account = Some(account);
+                        self.renew_tried = false;
+                    }
+                    // Vencida: primeiro tenta renovar pelo perfil guardado,
+                    // sem janela; só se isso falhar a pessoa é deslogada.
+                    Ok(Session::SignedOut) if self.me.signed_in && !self.renew_tried => {
+                        log::info!("sessão vencida; renovando sem janela");
+                        self.renew_tried = true;
+                        self.jobs.sign_in(true);
+                    }
+                    Ok(Session::SignedOut) if self.me.signed_in => self.drop_session(ctx, "Sua sessão expirou. Entre de novo."),
+                    Ok(Session::SignedOut) => {}
+                    // O YouTube mudou a resposta: não é motivo para deslogar.
+                    Ok(Session::Unknown) => log::warn!("conta: resposta não reconhecida; a sessão fica como está"),
+                    // Sem rede não é sessão vencida: fica como está.
+                    Err(error) => log::info!("conta: {error}"),
+                },
+                Reply::Playlists(result) => match result {
+                    Ok(list) => self.me.playlists = list,
+                    Err(error) => log::info!("playlists da conta: {error}"),
+                },
+                Reply::Done { message, result, refresh } => match result {
+                    Ok(()) => {
+                        self.say(ctx, &message);
+                        match refresh {
+                            Refresh::Nothing => {}
+                            Refresh::Playlists => {
+                                self.jobs.playlists();
+                                self.pages.remove(&View::Library(crate::ui::LibraryTab::Playlists));
+                            }
+                            Refresh::Page(view) => {
+                                self.pages.remove(&view);
+                                if *self.view() == view {
+                                    self.ensure_loaded(&view);
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("ação da conta: {error}");
+                        self.say(ctx, &format!("Não deu certo: {error}"));
+                    }
+                },
+            }
+        }
+    }
+
+    fn refresh_snapshot(&mut self, ctx: &egui::Context) {
+        let rev = self.player.revision();
+        if rev == self.snap_rev {
+            return;
+        }
+        self.snap_rev = rev;
+        self.snap = self.player.snapshot();
+        if let Some((id, text)) = self.snap.notice.clone()
+            && id != self.last_notice
+        {
+            self.last_notice = id;
+            self.say(ctx, &text);
+        }
+        let current = self.snap.current().cloned();
+        if self.me.signed_in
+            && self.snap.status == Status::Playing
+            && let Some(track) = &current
+            && self.history_for.as_deref() != Some(&track.video_id)
+        {
+            self.history_for = Some(track.video_id.clone());
+            self.jobs.add_history(track.video_id.clone());
+        }
+        // A semente do rádio chega sem artistas; a fila do YouTube os traz
+        // depois, para a mesma música. Por isso compara o título pronto.
+        let title = match &current {
+            Some(t) if t.artists.is_empty() => format!("{} · MusicFast", t.title),
+            Some(t) => format!("{} – {} · MusicFast", t.title, t.artist_names()),
+            None => "MusicFast".to_owned(),
+        };
+        if self.title_for.as_deref() != Some(title.as_str()) {
+            ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
+            self.title_for = Some(title);
+        }
+        // A capa da atual vai para o disco, para os controles do Windows.
+        if let Some(track) = &current
+            && self.art_for.as_deref() != Some(&track.video_id)
+        {
+            self.art_for = Some(track.video_id.clone());
+            self.art = None;
+            if let Some(url) = track.thumbs.url_for(544) {
+                let path = self.paths.art.join(format!("{}.jpg", track.video_id));
+                if path.exists() {
+                    self.art = Some((track.video_id.clone(), path));
+                } else {
+                    // A faxina da pasta (ler e apagar arquivos) vai junto
+                    // com o download, fora da thread da janela.
+                    self.jobs.art(track.video_id.clone(), url, path);
+                }
+            }
+        }
+    }
+
+    fn handle_wake(&mut self, ctx: &egui::Context) {
+        for request in self.wake.take() {
+            match request.as_str() {
+                "show" => raise(ctx),
+                "toggle" => self.player.send(Command::Toggle),
+                "next" => self.player.send(Command::Next),
+                "previous" => self.player.send(Command::Previous),
+                "quit" => ctx.send_viewport_cmd(ViewportCommand::Close),
+                _ => {}
+            }
+        }
+    }
+
+    /// Os controles de mídia do Windows (a sobreposição do volume, as teclas
+    /// de mídia do teclado e do fone).
+    fn media_controls(&mut self, ctx: &egui::Context) {
+        let Some(controls) = self.controls.as_mut() else { return };
+        for command in controls.commands() {
+            let cmd = match command {
+                np::Command::Play => Some(Command::Resume),
+                np::Command::Pause | np::Command::Stop => Some(Command::Pause),
+                np::Command::PlayPause => Some(Command::Toggle),
+                np::Command::Next => Some(Command::Next),
+                np::Command::Previous => Some(Command::Previous),
+                np::Command::SeekBy(ms) => Some(Command::SeekBy(ms as f64 / 1000.0)),
+                np::Command::SetPosition { position, .. } => Some(Command::Seek(position.as_secs_f64())),
+                np::Command::SetVolume(v) => Some(Command::SetVolume(v as f32)),
+                np::Command::SetShuffle(on) => Some(Command::SetShuffle(on)),
+                np::Command::SetRepeat(r) => Some(Command::SetRepeat(match r {
+                    np::Repeat::Off => Repeat::Off,
+                    np::Repeat::Track => Repeat::One,
+                    np::Repeat::Playlist => Repeat::All,
+                })),
+                np::Command::Raise => {
+                    raise(ctx);
+                    None
+                }
+                np::Command::Quit => {
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                    None
+                }
+                np::Command::OpenUri(_) => None,
+            };
+            if let Some(cmd) = cmd {
+                self.player.send(cmd);
+            }
+        }
+        let position = self.player.position();
+        // O estado só é remontado (cópias do título, artistas, endereço)
+        // quando algo mudou, ou uma vez por segundo para a posição: antes ia
+        // a cada quadro, inclusive nos 60 por segundo de uma rolagem. O
+        // `update` já só repassava a posição uma vez por segundo.
+        let has_art = self.art.is_some();
+        let (rev, art_sent, at) = self.controls_sent;
+        let (last, last_at) = self.last_position;
+        let expected = if self.snap.status == Status::Playing { last + last_at.elapsed().as_secs_f64() } else { last };
+        let jumped = (position - expected).abs() > 1.5;
+        if rev == self.snap_rev && art_sent == has_art && !jumped && at.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.controls_sent = (self.snap_rev, has_art, Instant::now());
+        let snap = &self.snap;
+        let playback = match snap.status {
+            Status::Playing => np::Playback::Playing,
+            Status::Paused | Status::Loading if snap.current().is_some() => np::Playback::Paused,
+            _ => np::Playback::Stopped,
+        };
+        let track = snap.current().map(|t| np::Track {
+            id: t.video_id.clone(),
+            title: t.title.clone(),
+            artists: t.artists.iter().map(|a| a.name.clone()).collect(),
+            album: t.album.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+            duration: snap.duration.or(t.duration_secs.map(f64::from)).map(Duration::from_secs_f64),
+            art_file: self.art.as_ref().filter(|(id, _)| *id == t.video_id).map(|(_, p)| p.clone()),
+            art_url: t.thumbs.url_for(544),
+            url: Some(format!("https://music.youtube.com/watch?v={}", t.video_id)),
+            ..np::Track::default()
+        });
+        let has_track = track.is_some();
+        controls.update(np::State {
+            playback,
+            track,
+            position: Duration::from_secs_f64(position.max(0.0)),
+            volume: Some(snap.volume as f64),
+            shuffle: Some(snap.shuffle),
+            repeat: Some(match snap.repeat {
+                Repeat::Off => np::Repeat::Off,
+                Repeat::One => np::Repeat::Track,
+                Repeat::All => np::Repeat::Playlist,
+            }),
+            controls: np::Controls { seek: has_track, ..np::Controls::default() },
+        });
+        // Um salto (busca na linha do tempo) avisa, para os controles pularem
+        // em vez de deslizar.
+        if has_track && jumped {
+            controls.seeked(Duration::from_secs_f64(position.max(0.0)));
+        }
+        self.last_position = (position, Instant::now());
+    }
+
+    /// O que a música atual precisa da rede: a curtida da conta, e a letra e
+    /// os relacionados quando estão na tela.
+    fn track_wanted(&mut self) {
+        let Some(track) = self.snap.current() else { return };
+        let id = track.video_id.clone();
+        // A semente ainda sem fila não tem id de verdade para pedir.
+        if id.is_empty() {
+            return;
+        }
+        let Some(info) = self.info.get(&id) else {
+            // Uma entrada por música tocada: sem teto, a sessão de um dia
+            // inteiro de rádio só cresceria (OTIMIZACAO.md, lei 8).
+            if self.info.len() >= 300 {
+                self.info.retain(|k, _| *k == id);
+                self.lyrics.retain(|k, _| *k == id);
+            }
+            if self.related.len() >= 12 {
+                self.related.retain(|k, _| *k == id);
+            }
+            self.info.insert(id.clone(), TrackInfo { answered: false, lyrics_id: None, related_id: None });
+            self.jobs.track_info(id);
+            return;
+        };
+        let lyrics_shown = self.side == Some(Side::Lyrics)
+            || (self.expanded && self.player_tab == Tab::Lyrics)
+            || self.mini.as_ref().is_some_and(|m| m.lyrics);
+        // Espera a resposta da fila: a letra do YouTube Music (a reserva)
+        // vem com o id dela.
+        if lyrics_shown && !self.lyrics.contains_key(&id) && info.answered {
+            let (track, lyrics_id) = (track.clone(), info.lyrics_id.clone());
+            self.lyrics.insert(id.clone(), LyricsState::Loading);
+            self.jobs.lyrics(id.clone(), track, lyrics_id);
+        }
+        let info = &self.info[&id];
+        if self.expanded
+            && self.player_tab == Tab::Related
+            && !self.related.contains_key(&id)
+            && let Some(related_id) = info.related_id.clone()
+        {
+            self.related.insert(id.clone(), PageState::default());
+            self.jobs.related(id, related_id);
+        }
+    }
+
+    fn session(&self) -> Saved {
+        Saved { queue: self.snap.queue.as_ref().clone(), ..self.light_session() }
+    }
+
+    /// A sessão sem a fila.
+    fn light_session(&self) -> Saved {
+        let snap = &self.snap;
+        Saved {
+            volume: snap.volume,
+            shuffle: snap.shuffle,
+            repeat: snap.repeat,
+            queue: Vec::new(),
+            index: snap.index,
+            position: if snap.current().is_some() { self.player.position() } else { 0.0 },
+            visitor: self.client.visitor(),
+            client_version: self.saved.client_version.clone(),
+            version_checked: self.saved.version_checked,
+            side: self.side.map(|s| s.key().to_owned()),
+            sidebar_mini: self.sidebar_mini,
+            sidebar_width: self.sidebar_width,
+            mini_anchor: self.mini_anchor,
+            window: self.window,
+        }
+    }
+
+    /// Lembra a janela só enquanto ela está normal: minimizada, o Windows a
+    /// põe em -32000,-32000 com 0×0, e maximizada o tamanho é o da tela (o
+    /// de antes de maximizar fica guardado).
+    fn track_window(&mut self, ctx: &egui::Context) {
+        // A janela pequena do mini player não é "a janela normal".
+        if self.mini.is_some() {
+            return;
+        }
+        let (minimized, maximized, outer, inner) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.minimized.unwrap_or(false), v.maximized.unwrap_or(false), v.outer_rect, v.inner_rect)
+        });
+        if minimized {
+            return;
+        }
+        if maximized {
+            if let Some(w) = self.window.as_mut() {
+                w.maximized = true;
+            }
+            return;
+        }
+        let (Some(outer), Some(inner)) = (outer, inner) else { return };
+        let geom = crate::state::WindowGeom {
+            x: outer.min.x,
+            y: outer.min.y,
+            width: inner.width(),
+            height: inner.height(),
+            maximized: false,
+        };
+        if geom.is_sane() {
+            self.window = Some(geom);
+        }
+    }
+
+    /// A janela vira o mini player: sem bordas, sempre no topo, no canto
+    /// onde ele ficou da última vez (ou no pé direito da janela atual).
+    fn enter_mini(&mut self, ctx: &egui::Context) {
+        if self.mini.is_some() {
+            return;
+        }
+        let (maximized, outer) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().outer_rect));
+        self.track_window(ctx);
+        self.mini = Some(Mini { lyrics: false, was_maximized: maximized });
+        self.expanded = false;
+        let anchor = self.mini_anchor.unwrap_or_else(|| match outer {
+            Some(r) => [r.right() - mini::WIDTH - 24.0, r.bottom() - 24.0],
+            None => [100.0, 700.0],
+        });
+        self.mini_anchor = Some(anchor);
+        if maximized {
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+        }
+        ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
+        ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(vec2(mini::WIDTH, mini::ROW)));
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+        self.place_mini(ctx);
+        self.round_corners = Some(true);
+    }
+
+    /// Tamanho e lugar do mini player, com o pé em `mini_anchor`.
+    fn place_mini(&self, ctx: &egui::Context) {
+        let (Some(mini), Some([x, bottom])) = (&self.mini, self.mini_anchor) else { return };
+        let h = mini::height(mini.lyrics);
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(mini::WIDTH, h)));
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x, bottom - h)));
+    }
+
+    /// Volta à janela inteira, no tamanho e lugar de antes.
+    fn leave_mini(&mut self, ctx: &egui::Context) {
+        let Some(mini) = self.mini.take() else { return };
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+        ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(egui::Vec2::from(crate::state::WindowGeom::MIN_SIZE)));
+        match self.window {
+            Some(g) => {
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(g.width, g.height)));
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(g.x, g.y)));
+            }
+            None => ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(1240.0, 800.0))),
+        }
+        if mini.was_maximized {
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+        }
+        self.round_corners = Some(false);
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+    }
+
+    /// O quadro do mini player: só ele, sem a página por trás.
+    fn mini_ui(&mut self, ui: &mut Ui, mut actions: Vec<Action>, position: f64) {
+        let ctx = ui.ctx().clone();
+        let Some(lyrics_open) = self.mini.as_ref().map(|m| m.lyrics) else { return };
+        // Guarda onde a pessoa o arrastou (quando a janela já tem o tamanho
+        // pedido: no meio de uma troca, o retângulo ainda é o de antes).
+        if let Some(r) = ctx.input(|i| i.viewport().outer_rect)
+            && (r.height() - mini::height(lyrics_open)).abs() < 2.0
+            && !ctx.input(|i| i.viewport().minimized.unwrap_or(false))
+        {
+            self.mini_anchor = Some([r.left(), r.bottom()]);
+        }
+        let current = self.snap.current().map(|t| t.video_id.clone());
+        let playing = self.snap.status == Status::Playing;
+        let lyrics = lyrics_open.then(|| current.as_ref().and_then(|id| self.lyrics.get(id)));
+        let mut out = mini::Out::default();
+        egui::CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, current: current.clone(), playing };
+            out = mini::show(ui, &mut cx, &self.snap, position, lyrics);
+        });
+        if out.toggle_lyrics
+            && let Some(m) = self.mini.as_mut()
+        {
+            m.lyrics = !m.lyrics;
+            self.place_mini(&ctx);
+        }
+        for action in actions {
+            self.apply(&ctx, action);
+        }
+        if playing || self.snap.status == Status::Loading {
+            // O fio do progresso anda.
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn autosave(&mut self) {
+        // Antes do primeiro `Snapshot`, a fila ainda é a restaurada.
+        if self.snap_rev == u64::MAX || self.saved_at.elapsed() < Duration::from_secs(15) {
+            return;
+        }
+        self.saved_at = Instant::now();
+        let session = self.light_session();
+        if session != self.saved || !Arc::ptr_eq(&self.saved_queue, &self.snap.queue) {
+            self.saved_queue = self.snap.queue.clone();
+            session.clone().save_in_background(self.snap.queue.clone(), &self.paths.state);
+            self.saved = session;
+        }
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let typing = ctx.memory(|m| m.focused().is_some());
+        ctx.input_mut(|i| {
+            if i.consume_key(Modifiers::COMMAND, Key::F) || (!typing && i.consume_key(Modifiers::NONE, Key::Slash)) {
+                self.search.focus = true;
+            }
+            if i.consume_key(Modifiers::ALT, Key::ArrowLeft) || i.pointer.button_pressed(PointerButton::Extra1) {
+                actions.push(Action::Back);
+            }
+            if i.consume_key(Modifiers::ALT, Key::ArrowRight) || i.pointer.button_pressed(PointerButton::Extra2) {
+                actions.push(Action::Forward);
+            }
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::M) {
+                actions.push(Action::Mini(self.mini.is_none()));
+            }
+            if typing {
+                return;
+            }
+            if i.consume_key(Modifiers::NONE, Key::Space) {
+                actions.push(Action::Cmd(Command::Toggle));
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::ArrowRight) {
+                actions.push(Action::Cmd(Command::Next));
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::ArrowLeft) {
+                actions.push(Action::Cmd(Command::Previous));
+            }
+            if i.consume_key(Modifiers::SHIFT, Key::ArrowRight) {
+                actions.push(Action::Cmd(Command::SeekBy(10.0)));
+            }
+            if i.consume_key(Modifiers::SHIFT, Key::ArrowLeft) {
+                actions.push(Action::Cmd(Command::SeekBy(-10.0)));
+            }
+            let volume = self.snap.volume;
+            if i.consume_key(Modifiers::COMMAND, Key::ArrowUp) {
+                actions.push(Action::Cmd(Command::SetVolume((volume + 0.05).min(1.0))));
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::ArrowDown) {
+                actions.push(Action::Cmd(Command::SetVolume((volume - 0.05).max(0.0))));
+            }
+        });
+    }
+
+    fn paint_toast(&mut self, ctx: &egui::Context) {
+        let Some((text, until)) = &self.toast else { return };
+        let now = ctx.input(|i| i.time);
+        if now > *until {
+            self.toast = None;
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_secs_f64((until - now).max(0.05)));
+        let screen = ctx.content_rect();
+        let pos = egui::pos2(screen.center().x, screen.bottom() - bar::HEIGHT - 24.0);
+        egui::Area::new(egui::Id::new("aviso"))
+            .order(egui::Order::Tooltip)
+            .pivot(Align2::CENTER_BOTTOM)
+            .fixed_pos(pos)
+            .interactable(false)
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(theme::TEXT)
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(egui::Margin::symmetric(16, 10))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(text.as_str()).color(egui::Color32::BLACK).font(theme::medium(14.0)));
+                    });
+            });
+    }
+}
+
+/// A biblioteca sem conta: o convite para entrar.
+fn sign_in_prompt(ui: &mut Ui, cx: &mut Cx) {
+    ui.add_space(80.0);
+    ui.vertical_centered(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+        crate::ui::icons::paint(ui.painter(), r, crate::ui::icons::LIBRARY, theme::TEXT_DIM);
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("Aproveite suas músicas favoritas").font(theme::bold(22.0)));
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Faça login para ver suas playlists, músicas curtidas, álbuns e histórico.").color(theme::TEXT_DIM));
+        ui.add_space(16.0);
+        let label = if cx.me.signing_in { "Entrando…" } else { "Fazer login" };
+        if kit::pill(ui, Some(crate::ui::icons::LOG_IN), label, true).clicked() && !cx.me.signing_in {
+            cx.act(Action::SignIn);
+        }
+    });
+}
+
+/// O degradê do fundo, como o do YouTube Music: azul-violeta escuro no alto
+/// à esquerda, vinho à direita, quase preto embaixo. Uma malha de 3×3
+/// vértices que a GPU interpola; custa 8 triângulos por quadro.
+/// `dark` (0..=1) leva tudo para o preto do tema (o player aberto).
+fn background(ctx: &egui::Context, dark: f32) {
+    use egui::{Color32, Mesh, pos2};
+    let r = ctx.content_rect();
+    let grid: [[Color32; 3]; 3] = [
+        [Color32::from_rgb(18, 13, 34), Color32::from_rgb(14, 8, 24), Color32::from_rgb(38, 7, 24)],
+        [Color32::from_rgb(9, 7, 16), Color32::from_rgb(7, 5, 10), Color32::from_rgb(20, 5, 13)],
+        [Color32::from_rgb(4, 4, 6), Color32::from_rgb(3, 3, 4), Color32::from_rgb(6, 3, 5)],
+    ];
+    let mut mesh = Mesh::default();
+    for (row, colors) in grid.iter().enumerate() {
+        for (col, color) in colors.iter().enumerate() {
+            let p = pos2(r.left() + r.width() * col as f32 / 2.0, r.top() + r.height() * row as f32 / 2.0);
+            mesh.colored_vertex(p, color.lerp_to_gamma(theme::BG, dark));
+        }
+    }
+    for row in 0..2u32 {
+        for col in 0..2u32 {
+            let i = row * 3 + col;
+            mesh.add_triangle(i, i + 1, i + 3);
+            mesh.add_triangle(i + 1, i + 4, i + 3);
+        }
+    }
+    ctx.layer_painter(egui::LayerId::background()).add(mesh);
+}
+
+/// Cantos redondos (o mini player) ou os do sistema, pelo DWM do Windows 11.
+/// Noutros sistemas, e no Windows 10, não faz nada.
+fn round_corners(frame: &eframe::Frame, round: bool) {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT, DWMWCP_ROUND, DwmSetWindowAttribute};
+        let Ok(handle) = frame.window_handle() else { return };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+        let preference: i32 = if round { DWMWCP_ROUND } else { DWMWCP_DEFAULT };
+        // SAFETY: o HWND é o da janela viva deste quadro, e o atributo é um
+        // inteiro de 4 bytes, como o DWM pede.
+        unsafe {
+            DwmSetWindowAttribute(
+                h.hwnd.get() as _,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&preference as *const i32).cast(),
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (frame, round);
+}
+
+/// O aviso de versão nova na barra de cima, à esquerda da foto da conta:
+/// "Reiniciar para atualizar" quando já baixou, "Baixar versão nova" quando
+/// esta cópia não se troca sozinha, e o progresso enquanto baixa.
+fn update_badge(ui: &mut Ui, cx: &mut Cx, top: egui::Rect, state: &crate::update::State) {
+    use crate::update::State;
+    use egui::{CursorIcon, Id, Rect, pos2};
+    let (label, tip) = match state {
+        State::Idle => return,
+        State::Downloading { version, progress } => (format!("Baixando {:.0}%", progress * 100.0), format!("Baixando a versão {version}")),
+        State::Ready { version } => ("Reiniciar para atualizar".to_owned(), format!("A versão {version} está pronta")),
+        State::Manual { version, reason, .. } => ("Versão nova".to_owned(), format!("Saiu a versão {version}: {reason}")),
+    };
+    let font = theme::semibold(13.0);
+    let width = ui.fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme::TEXT).size().x) + 28.0;
+    let rect = Rect::from_center_size(pos2(top.right() - 76.0 - width / 2.0, top.center().y), vec2(width, 32.0));
+    let clickable = !matches!(state, State::Downloading { .. });
+    let resp = ui.interact(rect, Id::new("atualizacao"), if clickable { Sense::click() } else { Sense::hover() });
+    let fill = match (state, resp.hovered()) {
+        (State::Downloading { .. }, _) => theme::GLASS_HOVER,
+        (_, true) => egui::Color32::from_rgb(62, 166, 255),
+        _ => egui::Color32::from_rgb(40, 140, 235),
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(16), fill);
+    if let State::Downloading { progress, .. } = state {
+        let done = Rect::from_min_size(rect.min, vec2(rect.width() * progress.clamp(0.0, 1.0), rect.height()));
+        ui.painter().with_clip_rect(done).rect_filled(rect, CornerRadius::same(16), egui::Color32::from_rgba_unmultiplied(40, 140, 235, 160));
+    }
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, theme::TEXT);
+    let resp = resp.on_hover_text(tip);
+    if clickable && resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+        match state {
+            State::Ready { .. } => cx.act(Action::RestartToUpdate),
+            State::Manual { url, .. } => kit::open_in_browser(url),
+            _ => {}
+        }
+    }
+}
+
+/// Traz a janela para a frente (outra execução, ou os controles de mídia).
+fn raise(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+    ctx.send_viewport_cmd(ViewportCommand::Focus);
+}
+
+/// As capas guardadas para os controles são uma por música; ficam as 20
+/// mais novas. Roda na thread do download (`Jobs::art`).
+pub fn clean_art(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    if files.len() <= 20 {
+        return;
+    }
+    files.sort_unstable_by_key(|f| std::cmp::Reverse(f.0));
+    for (_, path) in files.into_iter().skip(20) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+impl eframe::App for MusicApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_wake(ctx);
+        self.handle_replies(ctx);
+        if self.me.signed_in && self.account_checked.elapsed() > Duration::from_secs(6 * 3600) {
+            self.account_checked = Instant::now();
+            self.jobs.account();
+        }
+        self.refresh_snapshot(ctx);
+        self.media_controls(ctx);
+        self.track_window(ctx);
+        self.track_wanted();
+        self.autosave();
+        // Compilações de desenvolvimento não perguntam: não vieram da página
+        // de releases e não teriam o que fazer com a resposta.
+        if !cfg!(debug_assertions) && Instant::now() >= self.next_update_check {
+            self.next_update_check = Instant::now() + fastframe_update::CHECK_INTERVAL;
+            self.updates.check();
+        }
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if !self.first_frame_logged {
+            // O instrumento do boot (DOCUMENTACAO_PERFORMANCE.md): o que a
+            // pessoa espera entre abrir e ver a janela desenhada.
+            self.first_frame_logged = true;
+            if let Some(started) = crate::STARTED.get() {
+                log::info!("primeiro quadro em {} ms desde o início do processo", started.elapsed().as_millis());
+            }
+            // A versão nova abriu: o ajudante para de esperar e apaga o backup.
+            if let Some(receipt) = self.update_receipt.take() {
+                let _ = std::thread::Builder::new().name("recibo-atualizacao".into()).spawn(move || {
+                    match receipt.acknowledge() {
+                        Ok(()) => log::info!("atualizado para {}", env!("CARGO_PKG_VERSION")),
+                        Err(error) => log::warn!("recibo da atualização: {error:#}"),
+                    }
+                });
+                self.say(&ctx, &format!("MusicFast atualizado para a versão {}.", env!("CARGO_PKG_VERSION")));
+            }
+            if let Some(error) = self.toast_on_start.take() {
+                log::warn!("atualização desfeita: {error}");
+                self.say(&ctx, "A atualização não abriu; a versão anterior foi restaurada.");
+            }
+        }
+        self.scrolling.apply(&ctx);
+        self.covers.begin_frame(&ctx);
+        let mut actions = Vec::new();
+        self.shortcuts(&ctx, &mut actions);
+        let position = self.player.position();
+        if let Some(round) = self.round_corners.take() {
+            round_corners(_frame, round);
+        }
+        if self.mini.is_some() {
+            self.mini_ui(ui, actions, position);
+            return;
+        }
+        let mut suggest = None;
+        let view = self.view().clone();
+        let current = self.snap.current().map(|t| t.video_id.clone());
+        let playing = self.snap.status == Status::Playing;
+        let (can_back, can_forward) = (self.at > 0, self.at + 1 < self.history.len());
+        if self.expanded && self.snap.current().is_none() {
+            self.expanded = false;
+        }
+        let expanded = self.expanded;
+        // O fundo do site: um degradê escuro atrás da janela inteira, e a
+        // coluna, a barra de cima e a página transparentes por cima dele.
+        // Com o player aberto o degradê some para o preto, como no site.
+        let dark = ctx.animate_bool_with_time_and_easing(egui::Id::new("player-aberto"), expanded, 0.3, egui::emath::easing::cubic_out);
+        background(&ctx, dark);
+
+        egui::Panel::bottom("barra")
+            .exact_size(bar::HEIGHT)
+            .resizable(false)
+            .frame(Frame::new().fill(bar::BG))
+            .show(ui, |ui| {
+                let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, current: current.clone(), playing };
+                bar::show(ui, &mut cx, &self.snap, position, self.side, expanded, &mut self.bar);
+            });
+        // Aberta, a coluna se ajusta arrastando a borda direita; recolhida, é
+        // fixa. Ids diferentes para a largura da recolhida não vazar para a
+        // aberta na memória do painel.
+        let mini = self.sidebar_mini;
+        let panel = if mini {
+            egui::Panel::left("navegacao-mini").exact_size(nav::SIDEBAR_MINI).resizable(false)
+        } else {
+            egui::Panel::left("navegacao")
+                .default_size(self.sidebar_width)
+                .size_range(nav::SIDEBAR_RANGE)
+                .resizable(true)
+        };
+        let shown = panel.frame(Frame::new().fill(egui::Color32::from_black_alpha(70))).show(ui, |ui| {
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, current: current.clone(), playing };
+            nav::sidebar(ui, &mut cx, &view, mini);
+        });
+        if !mini {
+            self.sidebar_width = nav::sidebar_width(shown.response.rect.width());
+        }
+        // Com o player aberto, a fila e a letra já estão nas abas dele.
+        if let Some(which) = self.side.filter(|_| !expanded) {
+            egui::Panel::right("lado")
+                .default_size(360.0)
+                .size_range(280.0..=520.0)
+                .resizable(true)
+                .frame(Frame::new().fill(egui::Color32::from_black_alpha(110)).inner_margin(egui::Margin::symmetric(14, 0)))
+                .show(ui, |ui| {
+                    let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, current: current.clone(), playing };
+                    match which {
+                        Side::Queue => side::queue(ui, &mut cx, &self.snap),
+                        Side::Lyrics => {
+                            let state = self.snap.current().and_then(|t| self.lyrics.get(&t.video_id));
+                            side::lyrics(ui, &mut cx, &self.snap, state, position);
+                        }
+                    }
+                });
+        }
+        egui::CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, current: current.clone(), playing };
+            let (top, _) = ui.allocate_exact_size(vec2(ui.available_width(), nav::TOP), Sense::hover());
+            let mut top_ui = ui.new_child(egui::UiBuilder::new().max_rect(top));
+            nav::top(&mut top_ui, &mut cx, &mut self.search, can_back, can_forward, &mut suggest);
+            update_badge(&mut top_ui, &mut cx, top, &self.updates.state());
+            // O player sobe de baixo por cima da página ao abrir, e desce ao
+            // fechar; parado aberto, a página nem é desenhada.
+            let shown = ctx.animate_bool_with_time_and_easing(egui::Id::new("player-aberto"), expanded, 0.3, egui::emath::easing::cubic_out);
+            let rest = egui::Rect::from_min_max(egui::pos2(ui.max_rect().left(), ui.cursor().top()), ui.max_rect().max);
+            if shown < 1.0 {
+                let mut page_ui = ui.new_child(egui::UiBuilder::new().max_rect(rest));
+                let ui = &mut page_ui;
+                if let View::Search { query, filter } = &view {
+                    ui.add_space(4.0);
+                    nav::filters(ui, &mut cx, query, *filter);
+                    ui.add_space(4.0);
+                }
+                if let View::Library(tab) = &view {
+                    ui.add_space(4.0);
+                    nav::library_tabs(ui, &mut cx, *tab);
+                    ui.add_space(4.0);
+                }
+                if view.needs_account() && !self.me.signed_in {
+                    sign_in_prompt(ui, &mut cx);
+                } else {
+                    let empty = PageState::default();
+                    let state = self.pages.get(&view).unwrap_or(&empty);
+                    page::show(ui, &mut cx, &view, state);
+                }
+            }
+            if shown > 0.0 {
+                let sheet = rest.translate(vec2(0.0, (1.0 - shown) * rest.height()));
+                ui.painter().rect_filled(sheet, CornerRadius::ZERO, theme::BG);
+                let mut sheet_ui = ui.new_child(egui::UiBuilder::new().max_rect(sheet));
+                sheet_ui.set_clip_rect(rest.intersect(ui.clip_rect()));
+                let id = current.clone().unwrap_or_default();
+                player::show(&mut sheet_ui, &mut cx, &self.snap, position, &mut self.player_tab, self.lyrics.get(&id), self.related.get(&id));
+            }
+        });
+
+        if let Some(open) = self.dialog.as_mut() {
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, current: current.clone(), playing };
+            if dialog::show(&ctx, open, &mut cx) {
+                self.dialog = None;
+            }
+        } else if expanded && ctx.input(|i| i.key_pressed(Key::Escape)) && ctx.memory(|m| m.focused().is_none()) {
+            actions.push(Action::Expand(false));
+        }
+
+        self.paint_toast(&ctx);
+        if let Some(input) = suggest {
+            self.jobs.suggestions(input);
+        }
+        for action in actions {
+            self.apply(&ctx, action);
+        }
+        if playing || self.snap.status == Status::Loading {
+            // O tempo anda: um quadro a cada quarto de segundo basta.
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.snap_rev != u64::MAX {
+            self.session().save_now(&self.paths.state);
+        }
+        self.controls = None;
+        self.player.shutdown();
+    }
+}
