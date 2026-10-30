@@ -546,7 +546,7 @@ fn extract(zip: &[u8], into: &Path) -> Result<(), String> {
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
         let rel = file.enclosed_name().ok_or("caminho inválido")?;
-        let path = into.join(rel);
+        let path = into.join(&rel);
         if file.is_dir() {
             std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
             continue;
