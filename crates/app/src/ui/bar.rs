@@ -36,6 +36,17 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, side: Opti
     let right = Rect::from_min_max(pos2(rect.right() - RIGHT_W, rect.top()), rect.max);
     let center = Rect::from_min_max(pos2(left.right(), rect.top()), pos2(right.left(), rect.bottom()));
 
+    // O fundo da barra abre (ou fecha) o player com a fila, como no site.
+    // Vem antes de tudo: botões, links e a linha do tempo, registrados
+    // depois, ficam por cima e pegam o clique primeiro; só o vazio sobra
+    // para cá.
+    if snap.current().is_some() {
+        let back = ui.interact(rect, Id::new("barra-fundo"), Sense::click());
+        if back.clicked() {
+            cx.act(Action::Expand(!expanded));
+        }
+    }
+
     controls(ui, cx, left, snap, position, duration);
     now_playing(ui, cx, center, snap, side, expanded);
     extras(ui, cx, right, snap, expanded, state);
@@ -68,9 +79,14 @@ fn timeline(ui: &mut Ui, cx: &mut Cx, bar: Rect, position: f64, duration: Option
     let hit = Rect::from_min_max(bar.min - vec2(0.0, 6.0), pos2(bar.right(), bar.top() + 8.0));
     let response = ui.interact(hit, Id::new("linha-do-tempo"), Sense::click_and_drag());
     let hovered = response.hovered() || response.dragged();
+    // A linha fica na borda de cima da barra: metade dela, a bolinha e a
+    // dica do tempo caem fora do painel e o recorte dele as cortava. Numa
+    // camada própria, acima dos painéis (e abaixo de menus e diálogos),
+    // nada as corta.
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, Id::new("linha-do-tempo-camada")));
     let line_h = if hovered { 4.0 } else { 2.0 };
     let line = Rect::from_min_max(pos2(bar.left(), bar.top() - line_h / 2.0), pos2(bar.right(), bar.top() + line_h / 2.0));
-    ui.painter().rect_filled(line, CornerRadius::ZERO, Color32::from_white_alpha(28));
+    painter.rect_filled(line, CornerRadius::ZERO, Color32::from_white_alpha(28));
     let Some(duration) = duration.filter(|d| *d > 0.0 && active) else { return };
 
     let at_pointer = |x: f32| (((x - bar.left()) / bar.width()).clamp(0.0, 1.0) as f64) * duration;
@@ -87,14 +103,14 @@ fn timeline(ui: &mut Ui, cx: &mut Cx, bar: Rect, position: f64, duration: Option
     let shown = state.seeking.unwrap_or(position).min(duration);
     let x = bar.left() + bar.width() * (shown / duration) as f32;
     let done = Rect::from_min_max(line.min, pos2(x, line.bottom()));
-    ui.painter().rect_filled(done, CornerRadius::ZERO, theme::ACCENT);
+    painter.rect_filled(done, CornerRadius::ZERO, theme::ACCENT);
     if hovered {
-        ui.painter().circle_filled(pos2(x, bar.top()), 7.0, theme::ACCENT);
+        painter.circle_filled(pos2(x, bar.top()), 7.0, theme::ACCENT);
         if let Some(p) = response.hover_pos() {
             let at = state.seeking.unwrap_or_else(|| at_pointer(p.x));
             let tip = Rect::from_center_size(pos2(p.x.clamp(bar.left() + 24.0, bar.right() - 24.0), bar.top() - 20.0), vec2(48.0, 20.0));
-            ui.painter().rect_filled(tip, CornerRadius::same(4), theme::ACTIVE);
-            ui.painter().text(tip.center(), Align2::CENTER_CENTER, kit::time(at), theme::regular(12.0), theme::TEXT);
+            painter.rect_filled(tip, CornerRadius::same(4), theme::ACTIVE);
+            painter.text(tip.center(), Align2::CENTER_CENTER, kit::time(at), theme::regular(12.0), theme::TEXT);
         }
     }
     response.on_hover_cursor(CursorIcon::PointingHand);

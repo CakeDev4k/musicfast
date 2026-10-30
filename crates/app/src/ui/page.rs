@@ -774,18 +774,30 @@ fn tile(ui: &mut Ui, cx: &mut Cx, item: &Item, id: Id) {
         Item::Track(_) => true,
         Item::Card(c) => c.play.is_some(),
     };
-    if response.hovered() && !round {
-        ui.painter().rect_filled(art, CornerRadius::same(6), Color32::from_black_alpha(90));
+    // O botão de tocar no canto, como no site. Ele existe em todo quadro, e
+    // o "mouse sobre a capa" vem da posição do ponteiro, não do `hovered()`
+    // da capa: o botão por cima tira o hover dela. Quando o botão só nascia
+    // com a capa em hover, entrar nele apagava o hover, o botão sumia no
+    // quadro seguinte, a capa voltava a ter hover, e assim por diante: o
+    // card piscava, e o clique caía na capa e abria o álbum em vez de tocar.
+    let button = Rect::from_center_size(art.right_bottom() - vec2(30.0, 30.0), vec2(40.0, 40.0));
+    let play = playable.then(|| ui.interact(button, id.with("tocar"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand));
+    let over = ui.rect_contains_pointer(art);
+    // Aparecer e sumir em ~120 ms, em vez de piscar de um quadro para o outro.
+    let shade = ui.ctx().animate_bool_with_time(id.with("hover"), over, 0.12);
+    if shade > 0.0 && !round {
+        ui.painter().rect_filled(art, CornerRadius::same(6), Color32::from_black_alpha((90.0 * shade) as u8));
     }
-    // O botão de tocar no canto, como no site.
     let mut play_clicked = false;
-    if playable && (response.hovered() || current) {
-        let button = Rect::from_center_size(art.right_bottom() - vec2(30.0, 30.0), vec2(40.0, 40.0));
-        let play = ui.interact(button, id.with("tocar"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-        let fill = if play.hovered() { Color32::WHITE } else { Color32::from_black_alpha(200) };
-        let fg = if play.hovered() { Color32::BLACK } else { Color32::WHITE };
-        ui.painter().circle_filled(button.center(), 20.0, fill);
-        icons::paint_filled(ui.painter(), button.shrink(11.0), icons::PLAY, fg);
+    if let Some(play) = play {
+        let shown = if current { 1.0 } else { shade };
+        if shown > 0.0 {
+            let lit = ui.ctx().animate_bool_with_time(id.with("tocar-luz"), play.hovered(), 0.1);
+            let fill = Color32::from_black_alpha(200).lerp_to_gamma(Color32::WHITE, lit).gamma_multiply(shown);
+            let fg = Color32::WHITE.lerp_to_gamma(Color32::BLACK, lit).gamma_multiply(shown);
+            ui.painter().circle_filled(button.center(), 20.0, fill);
+            icons::paint_filled(ui.painter(), button.shrink(11.0), icons::PLAY, fg);
+        }
         play_clicked = play.clicked();
     }
     let below = pos2(rect.left(), art.bottom() + 8.0);
@@ -797,7 +809,7 @@ fn tile(ui: &mut Ui, cx: &mut Cx, item: &Item, id: Id) {
 
     match item {
         Item::Track(track) => {
-            if response.hovered() {
+            if over {
                 cx.act(Action::Warm(track.video_id.clone()));
             }
             if response.clicked() || play_clicked {

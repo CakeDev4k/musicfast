@@ -114,7 +114,9 @@ pub(crate) enum Msg {
     Resolved { video_id: String, result: Result<Resolved, (String, bool)> },
     Fetched { video_id: String, result: Result<Arc<[u8]>, FetchError> },
     Queue { req: u64, result: Result<Watch, String> },
-    More { result: Result<Watch, String> },
+    /// A continuação do rádio, ou o autoplay do fim da fila. `req` é a fila
+    /// de quando foi pedida: se outra a trocou, a resposta não serve mais.
+    More { req: u64, result: Result<Watch, String> },
     Installed(Result<YtDlp, String>),
     /// A consulta diária: `Ok(None)` é já estar na última versão.
     Updated(Result<Option<YtDlp>, String>),
@@ -239,6 +241,12 @@ struct Engine {
     duration: Option<f64>,
     radio: Option<String>,
     more_inflight: bool,
+    /// A última música da qual o autoplay já buscou o rádio, para não
+    /// pedir de novo a cada quadro se o YouTube não devolveu nada.
+    autoplay_seed: Option<String>,
+    /// A fila acabou enquanto o autoplay ainda buscava: toca a primeira
+    /// que chegar.
+    resume_on_more: bool,
     queue_req: u64,
     failures: u32,
     notice: Option<(u64, String)>,
@@ -306,6 +314,8 @@ impl Engine {
             duration: None,
             radio: None,
             more_inflight: false,
+            autoplay_seed: None,
+            resume_on_more: false,
             queue_req: 0,
             failures: 0,
             notice: None,
@@ -407,7 +417,7 @@ impl Engine {
             Msg::Resolved { video_id, result } => self.on_resolved(video_id, result),
             Msg::Fetched { video_id, result } => self.on_fetched(video_id, result),
             Msg::Queue { req, result } => self.on_queue(req, result),
-            Msg::More { result } => self.on_more(result),
+            Msg::More { req, result } => self.on_more(req, result),
             Msg::Installed(result) => self.on_installed(result),
             Msg::Updated(result) => {
                 self.installing = false;
@@ -1096,10 +1106,18 @@ impl Engine {
                     match self.next_index() {
                         Some(n) => self.start(n, 0.0, true),
                         None => {
-                            self.status = Status::Paused;
-                            self.restore_at = Some(0.0);
-                            self.shared.position_ms.store(0, Ordering::Relaxed);
-                            self.pause_output();
+                            self.extend_radio();
+                            if self.more_inflight {
+                                // O autoplay ainda não respondeu: segue assim que chegar.
+                                self.resume_on_more = true;
+                                self.status = Status::Loading;
+                                self.step = Some("Buscando músicas parecidas");
+                            } else {
+                                self.status = Status::Paused;
+                                self.restore_at = Some(0.0);
+                                self.shared.position_ms.store(0, Ordering::Relaxed);
+                                self.pause_output();
+                            }
                         }
                     }
                 }
@@ -1169,23 +1187,55 @@ impl Engine {
         }
     }
 
+    /// Mantém a fila andando: com rádio, pede a continuação perto do fim;
+    /// sem rádio (um álbum, uma playlist, músicas escolhidas), ao chegar na
+    /// última música busca o rádio dela e acrescenta as parecidas no fim,
+    /// como o autoplay do YouTube Music. Com repetir ligado a fila não acaba,
+    /// então não há autoplay.
     fn extend_radio(&mut self) {
-        let Some(token) = self.radio.clone() else { return };
         let Some(i) = self.index else { return };
-        if self.more_inflight || i + 5 < self.queue.len() {
+        if self.more_inflight {
             return;
         }
-        self.more_inflight = true;
+        let req = self.queue_req;
         let client = self.client.clone();
         let tx = self.tx.clone();
-        let _ = std::thread::Builder::new().name("radio".into()).spawn(move || {
-            let result = client.watch_more(&token).map_err(|e| e.to_string());
-            let _ = tx.send(Msg::More { result });
-        });
+        match self.radio.clone() {
+            Some(token) => {
+                if i + 5 < self.queue.len() {
+                    return;
+                }
+                self.more_inflight = true;
+                let _ = std::thread::Builder::new().name("radio".into()).spawn(move || {
+                    let result = client.watch_more(&token).map_err(|e| e.to_string());
+                    let _ = tx.send(Msg::More { req, result });
+                });
+            }
+            None => {
+                if self.repeat != Repeat::Off || i + 1 < self.queue.len() {
+                    return;
+                }
+                let Some(last) = self.queue.last().map(|t| t.video_id.clone()) else { return };
+                if self.autoplay_seed.as_deref() == Some(last.as_str()) {
+                    return;
+                }
+                self.autoplay_seed = Some(last.clone());
+                self.more_inflight = true;
+                let _ = std::thread::Builder::new().name("autoplay".into()).spawn(move || {
+                    let result = client.watch(Some(&last), None, None).map_err(|e| e.to_string());
+                    let _ = tx.send(Msg::More { req, result });
+                });
+            }
+        }
     }
 
-    fn on_more(&mut self, result: Result<Watch, String>) {
+    fn on_more(&mut self, req: u64, result: Result<Watch, String>) {
         self.more_inflight = false;
+        let resume = std::mem::take(&mut self.resume_on_more);
+        if req != self.queue_req {
+            return;
+        }
+        let before = self.queue.len();
         match result {
             Ok(w) => {
                 let known: HashSet<String> = self.queue.iter().map(|t| t.video_id.clone()).collect();
@@ -1194,6 +1244,17 @@ impl Engine {
                 self.prepare_next();
             }
             Err(e) => log::warn!("mais rádio: {e}"),
+        }
+        if resume && self.playing.is_none() && self.want.is_none() {
+            if self.queue.len() > before {
+                self.start(before, 0.0, true);
+            } else {
+                self.status = Status::Paused;
+                self.step = None;
+                self.restore_at = Some(0.0);
+                self.shared.position_ms.store(0, Ordering::Relaxed);
+                self.pause_output();
+            }
         }
     }
 
