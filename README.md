@@ -38,14 +38,19 @@ Baixe o arquivo do seu sistema na
 
 | Sistema | Arquivo |
 | --- | --- |
-| Windows 10/11 (64 bits) | `musicfast-v…-x86_64-pc-windows-msvc.zip` |
+| Windows 10/11 (64 bits), instalador | `musicfast-v…-x86_64-pc-windows-msvc-setup.exe` |
+| Windows 10/11 (64 bits), portátil | `musicfast-v…-x86_64-pc-windows-msvc.zip` |
 | Linux x86_64 | `musicfast-v…-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux ARM64 | `musicfast-v…-aarch64-unknown-linux-gnu.tar.gz` |
 | macOS 11+ (Apple silicon e Intel) | `musicfast-v…-macos-universal.dmg` |
 
-- **Windows:** extraia o zip numa pasta sua e abra o `musicfast.exe`. O
-  executável não tem assinatura digital: no aviso do SmartScreen, clique em
-  **Mais informações → Executar assim mesmo**.
+- **Windows, instalador:** abra o `-setup.exe`. Instala só para o seu usuário
+  (sem pedir administrador) em `%LOCALAPPDATA%\Programs\MusicFast`, com
+  atalho no menu Iniciar e desinstalação por "Aplicativos instalados".
+- **Windows, portátil:** extraia o zip numa pasta sua e abra o
+  `musicfast.exe`. Nada é instalado; para remover, apague a pasta.
+- Nos dois, o executável não tem assinatura digital: no aviso do
+  SmartScreen, clique em **Mais informações → Executar assim mesmo**.
 - **Linux:** extraia o `.tar.gz` e rode `./install.sh` para pôr o MusicFast
   no menu de aplicativos (ou abra o `./musicfast` direto). O login precisa do
   WebKitGTK 4.1 (`libwebkit2gtk-4.1-0` no Debian/Ubuntu, `webkit2gtk4.1` no

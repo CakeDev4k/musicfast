@@ -2,7 +2,8 @@
 #
 #   git tag v0.1.1 && git push origin v0.1.1
 #
-# Compila para Windows, Linux (x86_64 e ARM) e macOS (universal), empacota
+# Compila para Windows (zip portátil e instalador), Linux (x86_64 e ARM) e
+# macOS (universal), empacota
 # no formato que o `fastframe-update` espera, escreve o `checksums.txt`,
 # assina-o com a chave do segredo MUSICFAST_SIGNING_KEY e publica a release.
 # Os apps instalados acham a versão nova em até um dia e se atualizam.
@@ -67,10 +68,28 @@ jobs:
           cp packaging/musicfast-portable.txt LICENSE README.md "dist/$name/"
           cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null
           ./"$name"/musicfast.exe --version
+      # O instalador sai ao lado do zip: quem instalou se atualiza pelo
+      # `-setup.exe` (rodado em silêncio pelo fastframe-update), quem extraiu
+      # o zip continua pelo zip. Os dois nomes são o contrato do atualizador.
+      - name: Instalador
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+            if ($LASTEXITCODE) { throw "não instalou o Inno Setup" }
+          }
+          $ico = Get-ChildItem target\release\build\musicfast-*\out\musicfast.ico |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          & $iscc /Q "/DVersion=$env:VERSION" "/DSourceDir=$PWD\target\release" "/DOutputDir=$PWD\dist" "/DIconFile=$($ico.FullName)" packaging\windows\musicfast.iss
+          if ($LASTEXITCODE) { throw "iscc falhou" }
+          Get-Item "dist\musicfast-v$env:VERSION-x86_64-pc-windows-msvc-setup.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
 
   linux:
     name: Linux ${{ matrix.arch }}
