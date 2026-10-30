@@ -39,7 +39,9 @@ pub fn thumbs(v: &Value) -> Thumbs {
         })
         .collect();
     out.sort_by_key(|t| t.width);
-    Thumbs(out)
+    let mut thumbs = Thumbs(out);
+    thumbs.compact();
+    thumbs
 }
 
 struct Browse {
@@ -751,7 +753,40 @@ pub fn lyrics(v: &Value) -> Option<Lyrics> {
     if text.trim().is_empty() {
         return None;
     }
-    Some(Lyrics { text, source: crate::json::text(&shelf["footer"]) })
+    Some(Lyrics { text, source: crate::json::text(&shelf["footer"]), lines: Vec::new() })
+}
+
+/// A letra do cliente Android (`timedLyricsModel`): as linhas com o tempo
+/// de cada uma (`cueRange`, em ms), ou só o texto quando o tempo não vem.
+pub fn timed_lyrics(v: &Value) -> Option<Lyrics> {
+    let model = find(&v["contents"], "timedLyricsModel", 12)?;
+    let data = list(at(model, "lyricsData.timedLyricsData"));
+    let ms = |c: &Value, key: &str| match &c[key] {
+        Value::String(s) => s.parse::<f64>().ok(),
+        other => other.as_f64(),
+    };
+    let mut lines = Vec::new();
+    let mut text = Vec::new();
+    for d in data {
+        let line = d["lyricLine"].as_str().unwrap_or_default().to_owned();
+        let cue = &d["cueRange"];
+        if let (Some(start), Some(end)) = (ms(cue, "startTimeMilliseconds"), ms(cue, "endTimeMilliseconds")) {
+            lines.push(crate::model::TimedLine { start: start / 1000.0, end: end / 1000.0, text: line.clone() });
+        }
+        text.push(line);
+    }
+    let text = text.join("\n");
+    if text.trim().is_empty() {
+        return None;
+    }
+    // Só vale com tempo em quase todas as linhas.
+    if lines.len() * 10 < data.len() * 9 {
+        lines.clear();
+    }
+    // A fonte vem como texto simples aqui, não em `runs` como no site.
+    let message = at(model, "lyricsData.sourceMessage");
+    let source = message.as_str().map(str::to_owned).unwrap_or_else(|| crate::json::text(message));
+    Some(Lyrics { text, source, lines })
 }
 
 pub fn suggestions(v: &Value) -> Vec<String> {

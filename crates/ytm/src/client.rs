@@ -317,8 +317,45 @@ impl Client {
         Ok(parse::watch_continuation(&self.post("next", "", body)?))
     }
 
+    /// A letra: primeiro pelo cliente do app Android, que pode mandar o
+    /// tempo de cada linha (com conta; sem ela o YouTube corta o tempo); se
+    /// ele falhar ou não tiver, a do site, só de texto.
     pub fn lyrics(&self, browse_id: &str) -> Result<Option<Lyrics>> {
+        match self.post_android("browse", json!({ "browseId": browse_id })) {
+            Ok(v) => {
+                if let Some(found) = parse::timed_lyrics(&v) {
+                    return Ok(Some(found));
+                }
+            }
+            Err(e) => log::debug!("letra pelo cliente Android: {e}"),
+        }
         Ok(parse::lyrics(&self.post("browse", "", json!({ "browseId": browse_id }))?))
+    }
+
+    /// Um pedido como o app Android do YouTube Music (`ANDROID_MUSIC`), com
+    /// a mesma conta: o único que recebe a letra com tempo.
+    fn post_android(&self, endpoint: &str, mut body: Value) -> Result<Value> {
+        const VERSION: &str = "7.27.52";
+        let (hl, gl) = self.locale();
+        body["context"] = json!({
+            "client": { "clientName": "ANDROID_MUSIC", "clientVersion": VERSION, "androidSdkVersion": 34, "osName": "Android", "osVersion": "14", "hl": hl, "gl": gl }
+        });
+        let mut req = self
+            .http
+            .post(format!("{BASE}{endpoint}?prettyPrint=false"))
+            .header("User-Agent", format!("com.google.android.apps.youtube.music/{VERSION} (Linux; U; Android 14) gzip"))
+            .header("X-Youtube-Client-Name", "21")
+            .header("X-Youtube-Client-Version", VERSION)
+            .json(&body);
+        if let Some(visitor) = self.visitor() {
+            req = req.header("X-Goog-Visitor-Id", visitor);
+        }
+        let resp = self.with_auth(req).send().map_err(|e| Error::Http(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(Error::Status(status.as_u16()));
+        }
+        resp.json().map_err(|e| Error::Json(e.to_string()))
     }
 
     /// A conta logada, ou se a sessão venceu (os cookies não valem mais).

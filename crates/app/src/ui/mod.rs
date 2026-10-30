@@ -164,6 +164,10 @@ pub enum Action {
     SignIn,
     SignOut,
     Dialog(Dialog),
+    /// Abrir "Armazenamento e cache" (e medir o cache).
+    Storage,
+    /// Apagar o cache do disco.
+    ClearCache,
     Rate(String, LikeStatus),
     /// Salvar (ou tirar) um álbum ou playlist da biblioteca.
     SaveCollection(String, bool),
@@ -175,6 +179,12 @@ pub enum Action {
     RestartToUpdate,
     /// Trocar o idioma (`None`: o do sistema).
     SetLanguage(Option<Lang>),
+    /// Ligar ou desligar a tradução da letra.
+    ToggleTranslation,
+    /// Abrir "Personalizar o player" na aba da letra.
+    PersonalizeLyrics,
+    /// Trocar a letra da música (`video_id`) pela próxima candidata.
+    OtherLyrics(String),
     /// Abrir "Personalizar o player" (com o player aberto atrás).
     Personalize,
     /// Escolher no computador a imagem de fundo de uma superfície.
@@ -190,6 +200,13 @@ pub struct Cx<'a> {
     pub me: &'a Me,
     /// O idioma escolhido; `None` segue o do sistema.
     pub language: Option<Lang>,
+    /// Quanto o som entregue demora a sair no fone (s): a letra segue o que
+    /// se ouve, não o que foi entregue.
+    pub latency: f64,
+    /// Mostrar a tradução da letra.
+    pub translate_lyrics: bool,
+    /// O estilo da letra (fonte, cor, desfoque, tradução).
+    pub lyrics_style: &'a crate::look::LyricsStyle,
     /// O `video_id` da música atual, e se está tocando.
     pub current: Option<String>,
     pub playing: bool,

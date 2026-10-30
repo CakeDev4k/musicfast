@@ -38,6 +38,8 @@ pub struct Saved {
     pub language: Option<String>,
     /// O fundo do player ("Personalizar o player").
     pub look: crate::look::Look,
+    /// A tradução da letra embaixo de cada linha (quando ela é de outro idioma).
+    pub translate_lyrics: bool,
 }
 
 /// Posição e tamanho da janela, em pontos.
@@ -90,19 +92,26 @@ impl Default for Saved {
             window: None,
             language: None,
             look: crate::look::Look::default(),
+            translate_lyrics: true,
         }
     }
 }
 
 impl Saved {
     pub fn load(path: &Path) -> Self {
-        match std::fs::read(path) {
+        let mut saved: Self = match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
                 log::warn!("estado ilegível, começando do zero: {error}");
                 Self::default()
             }),
             Err(_) => Self::default(),
+        };
+        // A fila gravada antes de `Thumbs::compact` traz todas as miniaturas
+        // de cada música; sem isto, seria regravada assim para sempre.
+        for track in &mut saved.queue {
+            track.thumbs.compact();
         }
+        saved
     }
 
     /// Grava numa thread, com a fila posta lá: copiar e serializar uma fila

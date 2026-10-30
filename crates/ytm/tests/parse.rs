@@ -154,6 +154,27 @@ fn cover_urls_carry_the_size_and_video_thumbs_pick_the_smallest_that_fits() {
     assert_eq!(parse::duration("2026"), None);
 }
 
+/// `compact` guarda só a maior das capas que aceitam tamanho, e todas as
+/// miniaturas de vídeo; o endereço pedido não muda.
+#[test]
+fn compact_thumbs_ask_for_the_same_urls() {
+    let mut cover = Thumbs(vec![
+        Thumb { url: "https://yt3.googleusercontent.com/abc=w60-h60-l90-rj".into(), width: 60 },
+        Thumb { url: "https://yt3.googleusercontent.com/abc=w120-h120-l90-rj".into(), width: 120 },
+    ]);
+    let before: Vec<_> = [60, 226, 544].map(|px| cover.url_for(px)).into();
+    cover.compact();
+    assert_eq!(cover.0.len(), 1);
+    assert_eq!(before, [60, 226, 544].map(|px| cover.url_for(px)));
+    let mut video = Thumbs(vec![
+        Thumb { url: "https://i.ytimg.com/vi/x/default.jpg".into(), width: 120 },
+        Thumb { url: "https://i.ytimg.com/vi/x/hqdefault.jpg".into(), width: 480 },
+    ]);
+    video.compact();
+    assert_eq!(video.0.len(), 2);
+    assert_eq!(video.url_for(60).unwrap(), "https://i.ytimg.com/vi/x/default.jpg");
+}
+
 /// Contra o YouTube de verdade: `cargo test -p musicfast-ytm -- --ignored`.
 #[test]
 #[ignore]

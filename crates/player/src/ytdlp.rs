@@ -64,6 +64,10 @@ const CHECKED_FILE: &str = "verificado";
 /// O YouTube muda o site sem aviso e o yt-dlp corrige em dias: uma consulta
 /// por dia pega a correção antes de a pessoa notar.
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// O teto de uma resolução (`job::output`). Uma normal leva 1–4 s; esta
+/// sobra é para a primeira, com o desafio de JavaScript e a rede lenta.
+/// Antes não havia teto: um yt-dlp travado prendia a música para sempre.
+const RESOLVE_LIMIT: Duration = Duration::from_secs(60);
 
 /// O Deno resolve o desafio de JavaScript do player do YouTube para o
 /// yt-dlp. Sem ele, só os clientes que dispensam o desafio funcionam (o
@@ -344,6 +348,10 @@ impl YtDlp {
             "--no-playlist",
             "--skip-download",
             "--no-progress",
+            // Uma conexão parada desiste em 15 s, em vez de esperar o
+            // padrão do sistema; o teto da chamada inteira é `RESOLVE_LIMIT`.
+            "--socket-timeout",
+            "15",
             // O endereço vale só para o IP que o pediu; o download também
             // sai por IPv4 (nesta máquina o IPv6 nem conecta).
             "--force-ipv4",
@@ -354,7 +362,13 @@ impl YtDlp {
             "--",
         ]);
         cmd.arg(format!("https://music.youtube.com/watch?v={video_id}"));
-        let out = crate::job::output(cmd).map_err(|e| (format!("o yt-dlp não abriu: {e}"), false))?;
+        let out = crate::job::output(cmd, RESOLVE_LIMIT).map_err(|e| match e.kind() {
+            std::io::ErrorKind::TimedOut => {
+                log::warn!("yt-dlp travou em {video_id} e foi encerrado depois de {} s", RESOLVE_LIMIT.as_secs());
+                ("o yt-dlp demorou demais e foi encerrado".to_owned(), false)
+            }
+            _ => (format!("o yt-dlp não abriu: {e}"), false),
+        })?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         let line = stdout.lines().rev().find(|l| l.trim_start().starts_with('{'));

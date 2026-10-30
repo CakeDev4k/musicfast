@@ -40,6 +40,8 @@ const SILENT_LIMIT: std::time::Duration = std::time::Duration::from_secs(25);
 /// No processo principal: abre a janela de login e espera. `Ok(None)` é a
 /// pessoa ter fechado a janela (ou, `silent`, o perfil não ter mais sessão).
 pub fn sign_in(silent: bool) -> Result<Option<String>, String> {
+    // Com a janela ainda fechada, o cache do navegador pode sair sem risco.
+    crate::storage::trim_browser(&crate::paths::Paths::new().webview);
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
     cmd.arg("--entrar");

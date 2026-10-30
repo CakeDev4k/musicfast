@@ -184,19 +184,18 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
         }
     });
     ui.add_space(10.0);
-    egui::ScrollArea::vertical().id_salt("playlists-lado").auto_shrink([false, false]).show(ui, |ui| {
-        let liked = ("VLLM".to_owned(), t().liked_songs.to_owned(), t().auto_playlist.to_owned());
-        let mut rows = vec![liked];
-        rows.extend(
-            cx.me
-                .playlists
-                .iter()
-                .filter(|c| c.browse_id != "VLLM")
-                .map(|c| (c.browse_id.clone(), c.title.clone(), c.subtitle.clone())),
-        );
-        for (id, title, subtitle) in rows {
-            let target = View::browse(&id, None);
-            let selected = *view == target;
+    // Só as linhas à vista são montadas, e sem copiar os nomes: antes, a
+    // cada quadro, cada playlist da conta virava três `String` novas e uma
+    // linha desenhada fora da tela.
+    let me = cx.me;
+    let playlists: Vec<&musicfast_ytm::Card> = me.playlists.iter().filter(|c| c.browse_id != "VLLM").collect();
+    egui::ScrollArea::vertical().id_salt("playlists-lado").auto_shrink([false, false]).show_rows(ui, 48.0, playlists.len() + 1, |ui, range| {
+        for i in range {
+            let (id, title, subtitle) = match i.checked_sub(1) {
+                None => ("VLLM", t().liked_songs, t().auto_playlist),
+                Some(p) => (playlists[p].browse_id.as_str(), playlists[p].title.as_str(), playlists[p].subtitle.as_str()),
+            };
+            let selected = matches!(view, View::Browse { id: open, params: None } if open == id);
             let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
             let item = rect.shrink2(vec2(10.0, 1.0));
             if selected {
@@ -205,12 +204,12 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
                 ui.painter().rect_filled(item, CornerRadius::same(theme::RADIUS), theme::GLASS);
             }
             let w = item.width() - 24.0;
-            let t = kit::one_line(ui, &title, theme::medium(14.0), theme::TEXT, w);
-            ui.painter().galley(pos2(item.left() + 12.0, item.center().y - 17.0), t, theme::TEXT);
-            let s = kit::one_line(ui, &subtitle, theme::regular(12.0), theme::TEXT_DIM, w);
-            ui.painter().galley(pos2(item.left() + 12.0, item.center().y + 2.0), s, theme::TEXT_DIM);
+            let title = kit::one_line(ui, title, theme::medium(14.0), theme::TEXT, w);
+            ui.painter().galley(pos2(item.left() + 12.0, item.center().y - 17.0), title, theme::TEXT);
+            let sub = kit::one_line(ui, subtitle, theme::regular(12.0), theme::TEXT_DIM, w);
+            ui.painter().galley(pos2(item.left() + 12.0, item.center().y + 2.0), sub, theme::TEXT_DIM);
             if response.on_hover_cursor(CursorIcon::PointingHand).clicked() && !selected {
-                cx.act(Action::Open(target));
+                cx.act(Action::Open(View::browse(id, None)));
             }
         }
     });
@@ -233,6 +232,9 @@ fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
         r.context_menu(|ui| {
             if ui.button(t().sign_in_pasting_cookies).clicked() {
                 cx.act(Action::Dialog(super::Dialog::Cookies { text: String::new(), error: None }));
+            }
+            if ui.button(t().storage).clicked() {
+                cx.act(Action::Storage);
             }
         });
         return;
@@ -278,6 +280,9 @@ fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
             }
             menu_divider(ui);
             language_rows(ui, cx);
+            if menu_row(ui, icons::TRASH_2, t().storage) {
+                cx.act(Action::Storage);
+            }
             menu_divider(ui);
             if menu_row(ui, icons::LOG_OUT, t().sign_out) {
                 cx.act(Action::SignOut);

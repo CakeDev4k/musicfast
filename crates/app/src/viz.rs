@@ -160,6 +160,12 @@ impl VizCfg {
     }
 }
 
+/// O intervalo entre quadros enquanto o visualizador mexe: ~30 por segundo,
+/// o mesmo ritmo da letra. Sem prazo, o egui refazia a janela inteira na
+/// taxa do monitor (144 vezes por segundo num de 144 Hz) só pelas barras;
+/// a queda das faixas usa o tempo real (`dt`), então o movimento não muda.
+pub const FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+
 const FFT: usize = 2048;
 /// As faixas que o analisador calcula; `VizCfg::count` junta de várias em uma.
 pub const BANDS: usize = 96;

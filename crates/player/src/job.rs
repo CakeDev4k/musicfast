@@ -5,18 +5,25 @@
 //! Gerenciador de Tarefas, o Windows encerra o yt-dlp e o Deno que ele abre
 //! (OTIMIZACAO.md §5.5: processo órfão segura arquivo e CPU). O filho nasce
 //! suspenso e só roda depois de estar no job, para que nenhum neto escape.
+//!
+//! Cada chamada tem prazo (`output`): um yt-dlp travado (rede engasgada, um
+//! desafio de JavaScript que não termina) deixava a música em "Buscando o
+//! áudio" para sempre. Passado o prazo, sai o filho e tudo o que ele abriu,
+//! por um segundo job só dele, dentro do do app.
 
-#[cfg(windows)]
-use std::process::Child;
-use std::process::{Command, Stdio};
+use std::io::Read;
+use std::process::{Child, Command, Output, Stdio};
 #[cfg(windows)]
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
-
+/// De quanto em quanto tempo o filho é conferido: no máximo isto a mais
+/// numa resolução de 1–4 s.
+const POLL: Duration = Duration::from_millis(20);
 
 #[cfg(windows)]
 mod win {
@@ -30,6 +37,7 @@ mod win {
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
@@ -38,29 +46,37 @@ mod win {
     unsafe impl Send for Job {}
     unsafe impl Sync for Job {}
 
+    impl Drop for Job {
+        /// Fechar o último handle encerra o que ainda estiver no job
+        /// (`KILL_ON_JOB_CLOSE`): o neto que sobrou de uma chamada sai junto.
+        fn drop(&mut self) {
+            // SAFETY: o handle é nosso e fecha uma vez.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
     pub fn create() -> std::io::Result<Job> {
         // SAFETY: job anônimo com atributos padrão; o handle é conferido.
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
             return Err(std::io::Error::last_os_error());
         }
+        let job = Job(job);
         // SAFETY: estrutura zerada com só o limite que queremos.
         let ok = unsafe {
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             SetInformationJobObject(
-                job,
+                job.0,
                 JobObjectExtendedLimitInformation,
                 &limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const c_void,
                 size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             )
         };
         if ok == 0 {
-            // SAFETY: o handle é nosso e fecha uma vez.
-            unsafe { CloseHandle(job) };
             return Err(std::io::Error::last_os_error());
         }
-        Ok(Job(job))
+        Ok(job)
     }
 
     pub fn assign(job: &Job, process: HANDLE) -> std::io::Result<()> {
@@ -69,6 +85,12 @@ mod win {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    /// Encerra tudo o que está no job.
+    pub fn terminate(job: &Job) {
+        // SAFETY: o handle é nosso e está aberto.
+        unsafe { TerminateJobObject(job.0, 1) };
     }
 
     /// Retoma as threads de um processo criado suspenso (o `std::process`
@@ -118,10 +140,11 @@ fn job() -> Option<&'static win::Job> {
     .as_ref()
 }
 
-/// Roda até o fim, sem janela e dentro do
-/// job. Devolve a saída como `Command::output`. Prioridade normal: quem
-/// espera a resolução é a pessoa que clicou em tocar.
-pub fn output(mut cmd: Command) -> std::io::Result<std::process::Output> {
+/// Roda até o fim, sem janela e dentro do job, e devolve a saída como
+/// `Command::output`. Passando de `limit`, encerra o filho e os netos dele e
+/// devolve `ErrorKind::TimedOut`. Prioridade normal: quem espera a resolução
+/// é a pessoa que clicou em tocar.
+pub fn output(mut cmd: Command, limit: Duration) -> std::io::Result<Output> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
@@ -129,20 +152,105 @@ pub fn output(mut cmd: Command) -> std::io::Result<std::process::Output> {
         use std::os::windows::process::CommandExt;
         let Some(job) = job() else {
             cmd.creation_flags(CREATE_NO_WINDOW);
-            return cmd.output();
+            let mut child = cmd.spawn()?;
+            return collect(&mut child, limit, |child| {
+                let _ = child.kill();
+            });
         };
         cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         let mut child: Child = cmd.spawn()?;
-        let started = win::assign(job, child.as_raw_handle() as _).and_then(|()| win::resume(child.id()));
-        if let Err(error) = started {
+        let handle = child.as_raw_handle() as _;
+        if let Err(error) = win::assign(job, handle) {
             // Um filho suspenso para sempre deixaria quem chamou esperando.
             let _ = child.kill();
             return Err(error);
         }
-        child.wait_with_output()
+        // O job só desta chamada, aninhado no do app (Windows 8 em diante):
+        // encerrá-lo leva os netos junto. Sem ele, só o filho sai no prazo.
+        let tree = win::create().ok().filter(|tree| win::assign(tree, handle).is_ok());
+        if let Err(error) = win::resume(child.id()) {
+            let _ = child.kill();
+            return Err(error);
+        }
+        collect(&mut child, limit, |child| match &tree {
+            Some(tree) => win::terminate(tree),
+            None => {
+                let _ = child.kill();
+            }
+        })
     }
     #[cfg(not(windows))]
     {
-        cmd.output()
+        let mut child = cmd.spawn()?;
+        collect(&mut child, limit, |child| {
+            let _ = child.kill();
+        })
+    }
+}
+
+/// Espera o filho até `limit`, lendo a saída em paralelo (o que o
+/// `wait_with_output` faz, sem prazo). `end` encerra o que ele deixou: no
+/// prazo, ele e os netos; ao terminar bem, um neto que ainda segure a saída
+/// e não deixaria a leitura chegar ao fim.
+fn collect(child: &mut Child, limit: Duration, end: impl Fn(&mut Child)) -> std::io::Result<Output> {
+    fn read(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let stdout = read(child.stdout.take());
+    let stderr = read(child.stderr.take());
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            end(child);
+            let _ = child.wait();
+            // As leituras terminam sozinhas quando a saída fecha.
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("passou de {} s", limit.as_secs())));
+        }
+        std::thread::sleep(POLL);
+    };
+    end(child);
+    Ok(Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shell(script: &str) -> Command {
+        if cfg!(windows) {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/C", script]);
+            cmd
+        } else {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", script]);
+            cmd
+        }
+    }
+
+    #[test]
+    fn a_quick_child_answers_with_its_output() {
+        let out = output(shell("echo pronto"), Duration::from_secs(20)).unwrap();
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("pronto"));
+    }
+
+    #[test]
+    fn a_stuck_child_is_ended_at_the_deadline() {
+        // O `ping` (ou o `sleep`) é neto: o `cmd` (ou o `sh`) é quem foi aberto.
+        let stuck = if cfg!(windows) { "ping -n 30 127.0.0.1 >NUL" } else { "sleep 30" };
+        let started = Instant::now();
+        let error = output(shell(stuck), Duration::from_millis(500)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
     }
 }

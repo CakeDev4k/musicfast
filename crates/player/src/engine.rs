@@ -25,7 +25,7 @@ use musicfast_ytm::{Client, Track, Watch};
 use serde::{Deserialize, Serialize};
 
 use crate::render::{Event, Loaded, RCmd, Renderer, Shared};
-use crate::source::{Decoder, FetchError, fetch, http_client};
+use crate::source::{Audio, Decoder, FetchError, fetch, http_client};
 use crate::ytdlp::{self, Resolved, YtDlp, now};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +112,7 @@ pub(crate) enum Msg {
     Cmd(Command),
     Audio(Event),
     Resolved { video_id: String, result: Result<Resolved, (String, bool)> },
-    Fetched { video_id: String, result: Result<Arc<[u8]>, FetchError> },
+    Fetched { video_id: String, result: Result<Audio, FetchError> },
     Queue { req: u64, result: Result<Watch, String> },
     /// A continuação do rádio, ou o autoplay do fim da fila. `req` é a fila
     /// de quando foi pedida: se outra a trocou, a resposta não serve mais.
@@ -165,6 +165,19 @@ impl Player {
         self.shared.position_ms.load(Ordering::Relaxed) as f64 / 1000.0
     }
 
+    /// Quanto o som entregue demora a sair no dispositivo, em segundos (0
+    /// antes de abrir a saída, ou onde o sistema não diz).
+    pub fn latency(&self) -> f64 {
+        let clock = self.shared.clock.lock().unwrap_or_else(|e| e.into_inner());
+        clock.as_ref().map_or(0.0, |c| c.latency().as_secs_f64().min(1.0))
+    }
+
+    /// Onde está o que a pessoa ouve agora: a posição menos a latência.
+    /// É a que a letra deve seguir.
+    pub fn heard_position(&self) -> f64 {
+        (self.position() - self.latency()).max(0.0)
+    }
+
     /// As últimas amostras tocadas (para o visualizador) e a taxa delas.
     pub fn scope(&self, out: &mut [f32]) -> u32 {
         self.shared.scope.read(out);
@@ -202,6 +215,13 @@ struct Want {
 
 const MAX_RESOLVING: usize = 3;
 const BYTES_KEPT: usize = 4;
+/// O teto, em bytes, das músicas guardadas (`keep_bytes`). Quatro músicas
+/// comuns somam ~16 MB (32 MB a 256 kbps) e cabem; quatro mixes de 1 h
+/// passavam de 230 MB. A atual e a próxima nunca saem por tamanho.
+const BYTES_BUDGET: usize = 48 * 1024 * 1024;
+/// Quantos pânicos o laço do player aguenta (`Engine::turn`) antes de
+/// desistir: um defeito que quebra toda volta pararia aqui, não num laço.
+const MAX_PANICS: u32 = 20;
 
 struct Engine {
     rx: Receiver<Msg>,
@@ -230,10 +250,14 @@ struct Engine {
     resolved: HashMap<String, Resolved>,
     resolving: HashSet<String>,
     retried: HashSet<String>,
-    bytes: VecDeque<(String, Arc<[u8]>)>,
+    bytes: VecDeque<(String, Audio)>,
     fetching: HashSet<String>,
 
-    queue: Vec<Track>,
+    /// A fila, dividida com o `Snapshot` (e com a tela): muda por
+    /// `Arc::make_mut`, que só copia quando a tela ainda segura a versão
+    /// publicada. Antes cada publicação copiava a fila inteira, e o app
+    /// carregava duas cópias dela o tempo todo.
+    queue: Arc<Vec<Track>>,
     index: Option<usize>,
     want: Option<Want>,
     playing: Option<(String, u64)>,
@@ -278,6 +302,8 @@ impl Engine {
         notify: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
         let resolved = load_cache(&config.cache_file);
+        // A mesma fila (vazia) do `Snapshot`: `publish` compara por ponteiro.
+        let queue = snapshot.lock().unwrap_or_else(|e| e.into_inner()).queue.clone();
         let ytdlp = YtDlp::locate(&config.bin_dir).map(Arc::new);
         let cookie_dir = config.cache_file.parent().map(|d| d.join("tmp")).unwrap_or_else(|| config.bin_dir.join("tmp"));
         ytdlp::clear_cookie_files(&cookie_dir);
@@ -306,7 +332,7 @@ impl Engine {
             retried: HashSet::new(),
             bytes: VecDeque::new(),
             fetching: HashSet::new(),
-            queue: Vec::new(),
+            queue,
             index: None,
             want: None,
             playing: None,
@@ -343,6 +369,7 @@ impl Engine {
         // PATH (winget), em ~3,9 s. Se só existe a segunda, a primeira vem em
         // segundo plano já na primeira música.
         self.spawn_maintenance();
+        let mut panics = 0;
         loop {
             let msg = match self.timeout() {
                 Some(t) => match self.rx.recv_timeout(t) {
@@ -355,18 +382,61 @@ impl Engine {
                     Err(_) => break,
                 },
             };
-            match msg {
-                Some(Msg::Quit) => break,
-                Some(m) => self.handle(m),
-                None => {}
+            if matches!(msg, Some(Msg::Quit)) {
+                break;
             }
-            self.housekeeping();
+            if !self.turn(msg) {
+                panics += 1;
+                // Um defeito que quebra toda volta não vira um laço de pânicos.
+                if panics >= MAX_PANICS {
+                    log::error!("o player entrou em pânico {panics} vezes; parando");
+                    break;
+                }
+            }
         }
         self.save_cache();
         self.rcmd(RCmd::Stop);
         if let Some(out) = self.output.as_mut() {
             out.pause();
         }
+    }
+
+    /// Uma volta do laço: a mensagem (se veio) e a manutenção. Um pânico no
+    /// meio não derruba o player: antes a thread morria calada, a tela
+    /// seguia, nada mais tocava e os comandos caíam no vazio até reabrir o
+    /// app. `false` se entrou em pânico.
+    fn turn(&mut self, msg: Option<Msg>) -> bool {
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(msg) = msg {
+                self.handle(msg);
+            }
+            self.housekeeping();
+        }))
+        .is_ok();
+        if !ok {
+            self.recover();
+        }
+        ok
+    }
+
+    /// Depois de um pânico no meio de uma mensagem. O que carregava para (a
+    /// música pedida podia ficar sem quem a levasse adiante), os pedidos em
+    /// andamento podem ser refeitos, e a tela volta a ver o estado. A música
+    /// que já toca segue: ela está no callback de áudio.
+    fn recover(&mut self) {
+        // O endereço do pânico já foi para o panicos.log.
+        log::error!("o player entrou em pânico; o que carregava parou");
+        self.want = None;
+        self.resolving.clear();
+        self.fetching.clear();
+        self.more_inflight = false;
+        self.resume_on_more = false;
+        if self.playing.is_none() && self.status == Status::Loading {
+            self.status = if self.index.is_some() { Status::Paused } else { Status::Idle };
+            self.step = None;
+        }
+        // O `publish` pode ter sido justamente onde quebrou.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.publish()));
     }
 
     fn timeout(&self) -> Option<Duration> {
@@ -440,8 +510,13 @@ impl Engine {
 
     fn publish(&mut self) {
         let mut s = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
-        let queue_changed = s.queue.len() != self.queue.len()
-            || s.queue.iter().zip(&self.queue).any(|(a, b)| a.video_id != b.video_id);
+        // Toda mudança da fila troca o ponteiro (`make_mut` copia, porque o
+        // `Snapshot` segura a versão publicada; ou uma fila nova): comparar
+        // ponteiros basta, sem percorrer 2.000 músicas a cada mensagem. E
+        // pega também a mesma música com dados novos (os artistas que a fila
+        // do YouTube traz para a semente do rádio), que a comparação por id
+        // deixava passar.
+        let queue_changed = !Arc::ptr_eq(&s.queue, &self.queue);
         let changed = queue_changed
             || s.index != self.index
             || s.status != self.status
@@ -455,7 +530,7 @@ impl Engine {
             return;
         }
         if queue_changed {
-            s.queue = Arc::new(self.queue.clone());
+            s.queue = self.queue.clone();
         }
         s.index = self.index;
         s.status = self.status;
@@ -493,6 +568,7 @@ impl Engine {
             Ok(mut out) => {
                 out.pause();
                 log::info!("saída de áudio: {} a {} Hz, {} canais", out.device_name(), out.sample_rate(), out.channels());
+                *self.shared.clock.lock().unwrap_or_else(|e| e.into_inner()) = Some(out.clock());
                 self.output = Some(out);
                 self.output_paused = true;
                 self.rcmds = Some(cmd_tx);
@@ -540,7 +616,7 @@ impl Engine {
     fn command(&mut self, cmd: Command) {
         match cmd {
             Command::PlayTracks { tracks, index } => {
-                self.queue = tracks;
+                self.queue = Arc::new(tracks);
                 self.radio = None;
                 self.queue_req += 1;
                 self.reshuffle();
@@ -548,7 +624,7 @@ impl Engine {
             }
             Command::PlayRadio { seed } => {
                 let video_id = seed.video_id.clone();
-                self.queue = vec![seed];
+                self.queue = Arc::new(vec![seed]);
                 self.radio = None;
                 self.start(0, 0.0, true);
                 self.fetch_queue(Some(video_id), None, None);
@@ -558,11 +634,11 @@ impl Engine {
                 self.radio = None;
                 match seed {
                     Some(seed) => {
-                        self.queue = vec![seed];
+                        self.queue = Arc::new(vec![seed]);
                         self.start(0, 0.0, true);
                     }
                     None => {
-                        self.queue.clear();
+                        self.queue = Arc::default();
                         self.index = None;
                         self.status = Status::Loading;
                         self.step = Some(musicfast_i18n::t().building_queue);
@@ -575,7 +651,7 @@ impl Engine {
                 if tracks.is_empty() {
                     return;
                 }
-                self.queue = tracks;
+                self.queue = Arc::new(tracks);
                 let index = index.min(self.queue.len() - 1);
                 self.index = Some(index);
                 self.duration = self.queue[index].duration_secs.map(f64::from);
@@ -639,7 +715,7 @@ impl Engine {
                 if i >= self.queue.len() {
                     return;
                 }
-                self.queue.remove(i);
+                Arc::make_mut(&mut self.queue).remove(i);
                 match self.index {
                     Some(cur) if i < cur => self.index = Some(cur - 1),
                     Some(cur) if i == cur => {
@@ -656,9 +732,9 @@ impl Engine {
             }
             Command::PlayNext(track) => {
                 match self.index {
-                    Some(i) => self.queue.insert(i + 1, track),
+                    Some(i) => Arc::make_mut(&mut self.queue).insert(i + 1, track),
                     None => {
-                        self.queue = vec![track];
+                        self.queue = Arc::new(vec![track]);
                         self.start(0, 0.0, true);
                         return;
                     }
@@ -666,7 +742,7 @@ impl Engine {
                 self.prepare_next();
             }
             Command::Enqueue(track) => {
-                self.queue.push(track);
+                Arc::make_mut(&mut self.queue).push(track);
                 if self.index.is_none() {
                     self.start(self.queue.len() - 1, 0.0, true);
                 } else {
@@ -702,12 +778,16 @@ impl Engine {
         }
         let from = self.index.map(|i| i + 1).unwrap_or(0);
         let n = self.queue.len();
+        if from + 1 >= n {
+            return;
+        }
+        let queue = Arc::make_mut(&mut self.queue);
         for i in (from + 1..n).rev() {
             self.rng ^= self.rng << 13;
             self.rng ^= self.rng >> 7;
             self.rng ^= self.rng << 17;
             let j = from + (self.rng % (i - from + 1) as u64) as usize;
-            self.queue.swap(i, j);
+            queue.swap(i, j);
         }
     }
 
@@ -800,7 +880,7 @@ impl Engine {
         }
     }
 
-    fn bytes_for(&mut self, video_id: &str) -> Option<Arc<[u8]>> {
+    fn bytes_for(&mut self, video_id: &str) -> Option<Audio> {
         let pos = self.bytes.iter().position(|(id, _)| id == video_id)?;
         let entry = self.bytes.remove(pos)?;
         let bytes = entry.1.clone();
@@ -808,13 +888,10 @@ impl Engine {
         Some(bytes)
     }
 
-    fn keep_bytes(&mut self, video_id: String, bytes: Arc<[u8]>) {
+    fn keep_bytes(&mut self, video_id: String, bytes: Audio) {
         self.bytes.retain(|(id, _)| *id != video_id);
         self.bytes.push_back((video_id, bytes));
-        // Teto: a atual, a próxima e as duas últimas (o "voltar" é na hora).
-        while self.bytes.len() > BYTES_KEPT {
-            self.bytes.pop_front();
-        }
+        trim_kept(&mut self.bytes);
     }
 
     /// Leva a música pedida adiante: bytes → decodificador → callback.
@@ -893,12 +970,12 @@ impl Engine {
     fn resolve(&mut self, video_id: &str) {
         let Some(ytdlp) = self.ytdlp_or_install() else { return };
         self.resolving.insert(video_id.to_owned());
-        let tx = self.tx.clone();
         let video_id = video_id.to_owned();
         let account = self.account.clone();
-        let _ = std::thread::Builder::new().name("resolver".into()).spawn(move || {
+        let failed = Msg::Resolved { video_id: video_id.clone(), result: Err(("erro interno ao ler a resposta do yt-dlp".into(), false)) };
+        answering("resolver", self.tx.clone(), Some(failed), move || {
             let result = ytdlp.resolve(&video_id, account.as_ref());
-            let _ = tx.send(Msg::Resolved { video_id, result });
+            Some(Msg::Resolved { video_id, result })
         });
     }
 
@@ -914,17 +991,18 @@ impl Engine {
     /// versão nova (não adianta baixar a mesma de novo).
     fn spawn_install(&mut self) {
         self.installing = true;
-        let tx = self.tx.clone();
         let dir = self.bin_dir.clone();
         let managed = self.ytdlp.as_ref().is_some_and(|y| y.is_managed(&self.bin_dir));
-        let _ = std::thread::Builder::new().name("instalar-yt-dlp".into()).spawn(move || {
+        // Sem resposta, `installing` ficaria ligado e nada mais instalaria.
+        let failed = Msg::Installed(Err("erro interno ao instalar o yt-dlp".into()));
+        answering("instalar-yt-dlp", self.tx.clone(), Some(failed), move || {
             let _ = std::fs::create_dir_all(&dir);
             let result = if managed {
                 ytdlp::update(&dir).and_then(|fresh| fresh.ok_or_else(|| musicfast_i18n::t().ytdlp_already_latest.to_owned()))
             } else {
                 ytdlp::install(&dir)
             };
-            let _ = tx.send(Msg::Installed(result));
+            Some(Msg::Installed(result))
         });
     }
 
@@ -936,16 +1014,15 @@ impl Engine {
         if due {
             self.installing = true;
         }
-        let tx = self.tx.clone();
         let dir = self.bin_dir.clone();
-        let _ = std::thread::Builder::new().name("manutencao-yt-dlp".into()).spawn(move || {
+        // Só a consulta diária tem quem espere por ela (`installing`).
+        let failed = due.then(|| Msg::Updated(Err("erro interno na consulta do yt-dlp".into())));
+        answering("manutencao-yt-dlp", self.tx.clone(), failed, move || {
             let _ = std::fs::create_dir_all(&dir);
             if let Err(error) = ytdlp::ensure_deno(&dir) {
                 log::warn!("Deno não instalado: {error}");
             }
-            if due {
-                let _ = tx.send(Msg::Updated(ytdlp::update(&dir)));
-            }
+            due.then(|| Msg::Updated(ytdlp::update(&dir)))
         });
     }
 
@@ -977,11 +1054,11 @@ impl Engine {
 
     fn spawn_fetch(&mut self, r: Resolved) {
         self.fetching.insert(r.video_id.clone());
-        let tx = self.tx.clone();
         let http = self.http.clone();
-        let _ = std::thread::Builder::new().name("download".into()).spawn(move || {
+        let failed = Msg::Fetched { video_id: r.video_id.clone(), result: Err(FetchError::Other("erro interno no download".into())) };
+        answering("download", self.tx.clone(), Some(failed), move || {
             let result = fetch(&http, &r);
-            let _ = tx.send(Msg::Fetched { video_id: r.video_id, result });
+            Some(Msg::Fetched { video_id: r.video_id, result })
         });
     }
 
@@ -1027,7 +1104,7 @@ impl Engine {
         }
     }
 
-    fn on_fetched(&mut self, video_id: String, result: Result<Arc<[u8]>, FetchError>) {
+    fn on_fetched(&mut self, video_id: String, result: Result<Audio, FetchError>) {
         self.fetching.remove(&video_id);
         match result {
             Ok(bytes) => {
@@ -1148,12 +1225,12 @@ impl Engine {
         self.queue_req += 1;
         let req = self.queue_req;
         let client = self.client.clone();
-        let tx = self.tx.clone();
-        let _ = std::thread::Builder::new().name("fila".into()).spawn(move || {
+        let failed = Msg::Queue { req, result: Err(musicfast_i18n::t().ytm_internal_error.to_owned()) };
+        answering("fila", self.tx.clone(), Some(failed), move || {
             let result = client
                 .watch(video_id.as_deref(), playlist_id.as_deref(), params.as_deref())
                 .map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Queue { req, result });
+            Some(Msg::Queue { req, result })
         });
     }
 
@@ -1180,13 +1257,13 @@ impl Engine {
                     }
                 };
                 // A atual guarda os dados que já tinha (capa, duração).
-                self.queue = tracks;
+                self.queue = Arc::new(tracks);
                 self.index = Some(pos);
                 self.reshuffle();
                 self.prepare_next();
             }
             None => {
-                self.queue = watch.tracks;
+                self.queue = Arc::new(watch.tracks);
                 self.reshuffle();
                 self.start(0, 0.0, true);
             }
@@ -1206,15 +1283,18 @@ impl Engine {
         let req = self.queue_req;
         let client = self.client.clone();
         let tx = self.tx.clone();
+        // Sem resposta, `more_inflight` ficaria ligado e a fila não cresceria
+        // mais até reabrir o app.
+        let failed = Msg::More { req, result: Err(musicfast_i18n::t().ytm_internal_error.to_owned()) };
         match self.radio.clone() {
             Some(token) => {
                 if i + 5 < self.queue.len() {
                     return;
                 }
                 self.more_inflight = true;
-                let _ = std::thread::Builder::new().name("radio".into()).spawn(move || {
+                answering("radio", tx, Some(failed), move || {
                     let result = client.watch_more(&token).map_err(|e| e.to_string());
-                    let _ = tx.send(Msg::More { req, result });
+                    Some(Msg::More { req, result })
                 });
             }
             None => {
@@ -1227,9 +1307,9 @@ impl Engine {
                 }
                 self.autoplay_seed = Some(last.clone());
                 self.more_inflight = true;
-                let _ = std::thread::Builder::new().name("autoplay".into()).spawn(move || {
+                answering("autoplay", tx, Some(failed), move || {
                     let result = client.watch(Some(&last), None, None).map_err(|e| e.to_string());
-                    let _ = tx.send(Msg::More { req, result });
+                    Some(Msg::More { req, result })
                 });
             }
         }
@@ -1244,8 +1324,12 @@ impl Engine {
         let before = self.queue.len();
         match result {
             Ok(w) => {
-                let known: HashSet<String> = self.queue.iter().map(|t| t.video_id.clone()).collect();
-                self.queue.extend(w.tracks.into_iter().filter(|t| !known.contains(&t.video_id)));
+                let known: HashSet<&str> = self.queue.iter().map(|t| t.video_id.as_str()).collect();
+                let fresh: Vec<Track> = w.tracks.into_iter().filter(|t| !known.contains(t.video_id.as_str())).collect();
+                // Sem nada novo, a fila (e a cópia que a mudança custaria) fica.
+                if !fresh.is_empty() {
+                    Arc::make_mut(&mut self.queue).extend(fresh);
+                }
                 self.radio = w.continuation;
                 self.prepare_next();
             }
@@ -1294,4 +1378,120 @@ fn load_cache(path: &std::path::Path) -> HashMap<String, Resolved> {
         .filter(|r| r.fresh(now))
         .map(|r| (r.video_id.clone(), r))
         .collect()
+}
+
+/// O teto das músicas guardadas: a atual, a próxima e as duas últimas (o
+/// "voltar" é na hora), até `BYTES_BUDGET` juntas. As duas do fim (as
+/// últimas usadas: a atual e a próxima) ficam mesmo acima dele. O que sai
+/// daqui e ainda toca continua vivo no decodificador.
+fn trim_kept(kept: &mut VecDeque<(String, Audio)>) {
+    let mut total: usize = kept.iter().map(|(_, b)| b.len()).sum();
+    while kept.len() > BYTES_KEPT || (kept.len() > 2 && total > BYTES_BUDGET) {
+        if let Some((_, old)) = kept.pop_front() {
+            total -= old.len();
+        }
+    }
+}
+
+/// Uma thread de trabalho do player que sempre responde ao motor: se `work`
+/// entrar em pânico (a saída do yt-dlp ou o JSON do YouTube numa forma
+/// inesperada), a resposta é `on_panic`. Sem ela, o motor esperava para
+/// sempre: a música parada em "Buscando o áudio" (marcada como resolvendo,
+/// nunca pedida de novo), o rádio sem crescer até reabrir o app. As threads
+/// da janela já faziam o mesmo (`jobs::spawn_or`, DOCUMENTACAO_PERFORMANCE.md
+/// §1.2).
+fn answering(name: &str, tx: SyncSender<Msg>, on_panic: Option<Msg>, work: impl FnOnce() -> Option<Msg> + Send + 'static) {
+    let thread = name.to_owned();
+    let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
+        let msg = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+            Ok(msg) => msg,
+            Err(_) => {
+                // O endereço do pânico já foi para o panicos.log.
+                log::error!("thread {thread} do player entrou em pânico");
+                on_panic
+            }
+        };
+        if let Some(msg) = msg {
+            let _ = tx.send(msg);
+        }
+    });
+    if let Err(error) = spawned {
+        log::warn!("thread {name}: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_worker_that_panics_still_answers() {
+        let (tx, rx) = sync_channel(4);
+        let failed = Msg::Queue { req: 7, result: Err("falhou".into()) };
+        answering("teste", tx, Some(failed), || panic!("JSON numa forma inesperada"));
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Msg::Queue { req: 7, result: Err(error) }) => assert_eq!(error, "falhou"),
+            Ok(_) => panic!("outra resposta"),
+            Err(error) => panic!("sem resposta: {error}"),
+        }
+    }
+
+    /// Um motor sem rodar o laço (`run` instalaria o Deno): só o estado.
+    fn engine(name: &str) -> Engine {
+        let dir = std::env::temp_dir().join(format!("musicfast-teste-{name}-{}", std::process::id()));
+        let (tx, rx) = sync_channel(16);
+        let config = Config {
+            bin_dir: dir.join("bin"),
+            cache_file: dir.join("enderecos.json"),
+            client: Arc::new(Client::new("pt", "BR").unwrap()),
+            volume: 1.0,
+        };
+        let snapshot = Arc::new(Mutex::new(Snapshot::default()));
+        Engine::new(config, rx, tx, snapshot, Arc::new(AtomicU64::new(0)), Arc::new(Shared::default()), Arc::new(|| {}))
+    }
+
+    #[test]
+    fn a_panic_in_a_message_leaves_the_player_answering() {
+        let mut e = engine("panico");
+        // Incoerente de propósito: com o índice fora da fila, `prepare_next`
+        // lê além do fim e entra em pânico.
+        e.index = Some(5);
+        e.playing = Some(("x".into(), 1));
+        e.want = Some(Want { video_id: "y".into(), token: 2, start_at: 0.0, autoplay: true });
+        e.resolving.insert("y".into());
+        e.more_inflight = true;
+        assert!(!e.turn(Some(Msg::Cmd(Command::SetRepeat(Repeat::One)))), "o pânico não aconteceu");
+        assert!(e.want.is_none() && e.resolving.is_empty() && !e.more_inflight);
+        // A mensagem seguinte é atendida e chega à tela.
+        assert!(e.turn(Some(Msg::Cmd(Command::SetVolume(0.5)))));
+        assert_eq!(e.snapshot.lock().unwrap().volume, 0.5);
+    }
+
+    #[test]
+    fn what_was_loading_stops_after_a_panic() {
+        let mut e = engine("carregando");
+        e.queue = Arc::new(vec![Track { video_id: "a".into(), ..Track::default() }]);
+        e.index = Some(0);
+        e.status = Status::Loading;
+        e.step = Some("Buscando o áudio");
+        e.recover();
+        assert_eq!(e.status, Status::Paused);
+        assert_eq!(e.snapshot.lock().unwrap().status, Status::Paused);
+    }
+
+    fn song(id: &str, mb: usize) -> (String, Audio) {
+        (id.to_owned(), Audio::from(vec![0u8; mb << 20]))
+    }
+
+    #[test]
+    fn common_songs_keep_four_and_long_mixes_keep_two() {
+        let mut kept: VecDeque<_> = ["a", "b", "c", "d", "e"].map(|id| song(id, 4)).into();
+        trim_kept(&mut kept);
+        assert_eq!(kept.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["b", "c", "d", "e"]);
+
+        // Mixes de 1 h (~58 MB): só a atual e a próxima, mesmo acima do teto.
+        let mut kept: VecDeque<_> = ["a", "b", "c"].map(|id| song(id, 58)).into();
+        trim_kept(&mut kept);
+        assert_eq!(kept.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+    }
 }

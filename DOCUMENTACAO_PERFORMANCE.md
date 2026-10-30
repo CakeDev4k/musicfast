@@ -147,7 +147,7 @@ compilando:
 Os três últimos cenários não passam pelo código mudado; a diferença está na
 variação da máquina e não é ganho desta passada.
 
-Processo vivo (`toolsb-processo.ps1`, 3 rodadas alternadas, autorizado
+Processo vivo (`tools\ab-processo.ps1`, 3 rodadas alternadas, autorizado
 pelo dono): o app parado no início, sessão restaurada e pausada, medido de
 12 a 22 s depois de abrir.
 
@@ -210,3 +210,232 @@ marca a abertura que saiu, em vez de medir zero.
 **Lição.** "Rápido porque não fez nada" vale também para quem lê a medida: o
 `--medir` imprime os vértices e recusa um quadro vazio, e foi assim que a
 queda de 1,6 s para 0,4 ms pôde ser aceita.
+
+## 2. Segunda passada — quadros, memória das capas, do player e dos fundos (30/10/2026)
+
+**Sintoma.** Pedido do dono: o app "cresceu bastante" (letra, visualizador,
+fundos personalizados) e "pode estar ficando mais pesado do que deveria".
+A passada leu o sistema inteiro atrás do que roda a cada quadro sem
+precisar e do que guarda memória sem teto.
+
+**O que já estava certo e ficou.** O fork do eframe não desenha com a
+janela minimizada ou coberta (só roda `logic`, no máximo 10 vezes por
+segundo), então nada aqui trata disso. O callback de áudio não trava nem
+aloca. A letra, as traduções e a faxina de cache rodam em threads.
+
+### 2.1 Quadros na taxa do monitor sem precisar
+
+- `ui/bar.rs`: o arco de "carregando" pedia `request_repaint()` sem prazo
+  — a janela inteira refeita na taxa do monitor durante toda a resolução
+  do yt-dlp (3 s numa música; mais de um minuto na primeira instalação). É
+  a hipótese dos 40–47 % de CPU que §1 deixou "não conferido". Agora ~30
+  quadros por segundo, como o arco do mini player já fazia.
+- `app.rs` e `look::preview`: o visualizador também pedia quadro sem
+  prazo enquanto toca. Agora `viz::FRAME` (33 ms, o ritmo da letra); a
+  queda das faixas já usava o tempo real, então o movimento é o mesmo.
+
+| Com o visualizador ligado, tocando | Antes | Depois |
+|---|---|---|
+| monitor de 60 Hz | 60 quadros/s | 30 (−50 %) |
+| monitor de 144 Hz | 144 quadros/s | 30 (−79 %) |
+
+Cada quadro refaz a interface inteira (o egui não redesenha só um pedaço);
+o `--medir` mede o custo de um quadro, não quantos são pedidos. No processo
+vivo, tocando com o visualizador do dono: 92,7 → 14,6 % de um núcleo
+(mediana; "Medidas", abaixo).
+
+### 2.2 Capas: sem alocar por quadro, e com teto em bytes
+
+`covers.rs`: cada capa desenhada montava, a cada quadro, duas `String` (o
+endereço com o tamanho e a chave do cache). A chave agora é um hash da
+origem (`Thumbs::source_for`, sem montar o endereço) e do degrau; o
+endereço só é montado para a capa que falta. O teto era 500 texturas — que
+numa tela de alta densidade (grade no degrau de 360 px, 518 kB cada)
+passavam de 250 MB de memória de vídeo; agora é `TEXTURE_BUDGET` (64 MB),
+e as que saem nunca são as desenhadas no último quadro.
+
+**Instrumento que mentia.** O `preload` do `--medir` gravava a capa com o
+endereço puro, mas a tela procurava `endereço#degrau` (a chave mudou em
+§1.3 e o `preload` não acompanhou): o `--medir` desenhava os quadradinhos
+de espera, não as capas. Agora o `preload` grava na mesma chave que a tela
+procura, em todos os degraus. Os números de §1 continuam valendo para o
+que mediam (o custo das linhas), mas não incluíam desenhar as capas.
+
+### 2.3 A coluna das playlists
+
+`ui/nav.rs`: a cada quadro, cada playlist da conta virava três `String`
+copiadas e uma linha montada, inclusive as fora da tela. Agora as linhas
+emprestam os nomes e só as visíveis são montadas (`show_rows`).
+
+### 2.4 O player: uma cópia da fila a menos, e cache com teto em bytes
+
+- `engine.rs`: a fila é um `Arc<Vec<Track>>` dividido com o `Snapshot` e
+  muda por `Arc::make_mut`. Antes cada publicação copiava a fila inteira
+  (o app guardava sempre duas cópias dela) e comparava 2.000 ids a cada
+  mensagem; agora a comparação é por ponteiro. Bônus: a comparação por id
+  deixava passar a mesma música com dados novos (a semente do rádio sem
+  artistas, depois com eles); por ponteiro, a tela recebe.
+- `keep_bytes`/`trim_kept`: guardava as 4 últimas músicas inteiras sem olhar
+  o tamanho — quatro mixes de 1 h passavam de 230 MB. Agora também até
+  `BYTES_BUDGET` (48 MB); a atual e a próxima nunca saem. Quatro músicas
+  comuns (16 MB, ou 32 MB a 256 kbps) continuam todas.
+- `source.rs`: o download virava `Arc<[u8]>`, conversão que copia a música
+  inteira (dobro do pico de memória no fim do download). Agora
+  `Audio(Arc<Vec<u8>>)`, sem cópia.
+
+### 2.5 Fundos personalizados
+
+`look.rs`:
+- A imagem desfocada encolhe antes do desfoque (até sobrar 4 px de
+  desfoque) e a placa de vídeo a amplia de volta, lisa. No desfoque
+  máximo, a foto de 1280×720 vira 160×90 (textura de 3,7 MB → 58 kB), e o
+  `fast_blur` roda em 64 vezes menos pixels; num GIF, por quadro.
+- GIF: o orçamento por superfície caiu de 160 MB para 64 MB, e o GIF que
+  passa dele encolhe todos os quadros em vez de perder o fim da animação
+  (abaixo de 240 px, corta como antes). Um GIF comum de fundo (498×280, 60
+  quadros, 33 MB) não muda.
+
+### 2.6 Pequenos, por quadro
+
+- `ytm::parse::thumbs` (`Thumbs::compact`): das capas que aceitam o tamanho
+  no endereço guarda só a maior (`url_for` só usa ela). Menos endereços em
+  cada página, na fila e no `estado.json`; a fila gravada antes é compactada
+  ao abrir (`Saved::load`).
+- `app.rs`, `track_wanted`: duas `String` por quadro (o idioma e a marca da
+  tradução da letra), com ou sem letra na tela; agora só quando a tradução
+  vai mesmo ser conferida.
+- `look::ensure_lyrics_fonts` sai na hora sem fonte escolhida e não copia
+  os nomes; `fonts::drop_previews_when_closed` sai na hora sem prévias
+  carregadas.
+
+### Medidas
+
+`--medir` na build desta passada (release em `target\medir`, com o
+trabalho em andamento da letra no mesmo código):
+
+| Cenário (p50 / p95 / máx, ms) | Depois |
+|---|---|
+| playlist 2.000 músicas | 0,44 / 0,60 / 1,02 |
+| playlist 200 músicas | 0,06 / 0,07 / 0,09 |
+| início (10 carrosséis) | 0,10 / 0,17 / 0,46 |
+| biblioteca (grade 300) | 0,08 / 0,10 / 0,19 |
+| fila 2.000 músicas | 0,03 / 0,06 / 0,14 |
+
+Sem coluna "antes": a base desenhava os quadradinhos no lugar das capas
+(§2.2), então não mede a mesma coisa.
+
+Processo vivo, A/B alternado (um script derivado de `tools\ab-processo.ps1`,
+na pasta de rascunho da sessão). Pasta de dados isolada (`LOCALAPPDATA`
+trocado só para o teste): a fila e a aparência do dono (visualizador "seda"
+na barra), volume zero — o visualizador lê o som antes do volume — e sem a
+conta. "Antes" é o `target\release\musicfast.exe` que o dono usava
+(compilado às 14:34, antes desta passada); "depois", esta build. Janela
+maximizada (1920×1009), monitor de 60 Hz. Cada abertura: 12 s para o início
+carregar, 10 s parado, `--tocar-pausar`, 8 s, 15 s tocando; toda rodada
+abaixo tocou (a linha "saída de áudio" no log).
+
+| 5 rodadas válidas de cada | Parado, CPU | Tocando, CPU (% de um núcleo) | Trabalho tocando |
+|---|---|---|---|
+| antes | 0–6,8 % | 77,8 / 87,4 / 92,7 / 93,3 / 97,1 | 151–217 MB |
+| depois | 0–0,2 % | 13,0 / 13,2 / 14,6 / 15,2 / 15,3 | 151–211 MB |
+
+Duas rodadas saíram da conta, uma de cada: "antes" com 0,9 % e 8 MB de
+trabalho, "depois" com 0,4 % — a janela minimizada ou coberta no meio da
+medida (minimizada, o Windows esvazia o conjunto de trabalho e o fork do
+eframe não desenha).
+
+A queda (6×) passa da conta de quadros (60 → 30, 2×). Hipótese, não
+conferida (o processo vivo não conta quadros): o pedido sem prazo não ficava
+preso ao vsync nesta máquina — notebook com duas placas, RTX 5050 e Radeon
+740M — e a janela redesenhava bem acima de 60 por segundo. Com
+`request_repaint_after` o ritmo é o do relógio, com ou sem vsync.
+
+A memória não muda neste roteiro (uma música de 8,6 MB e a página inicial):
+os tetos de §2.2–2.5 agem em mixes longos, GIFs e grades grandes, que ele não
+abre.
+
+**Cobertura.**
+- `covers::tests::over_the_budget_the_oldest_go_and_the_visible_stay` e
+  `the_same_cover_has_one_key_per_bucket`.
+- `engine::tests::common_songs_keep_four_and_long_mixes_keep_two`.
+- `look::tests::a_gif_over_the_budget_shrinks_and_keeps_every_frame` e
+  `a_blurred_backdrop_is_blurred_small`.
+- `ytm` `compact_thumbs_ask_for_the_same_urls`.
+
+**Não conferido.**
+- **A memória de §2.2–2.5 ao vivo**: é conta dos tetos; o roteiro A/B não
+  abre mix longo, GIF nem grade grande.
+- O arco de "carregando" (§2.1) sem medida própria: dura segundos por
+  música, curto demais para a janela de 15 s do A/B.
+- O visual do desfoque reduzido e do GIF encolhido não foi olhado na tela.
+
+**Descartado.**
+- *Guardar o layout da letra entre quadros*: cada quadro monta um
+  `LayoutJob` por linha (~0,2 ms com a letra aberta), mas o egui já guarda
+  as galleys; uma cópia própria arriscaria a letra velha na tela quando a
+  tradução chega ou as fontes trocam.
+- *As fontes do sistema* (~33 MB, CJK e afins): o `fastframe-fonts` lê os
+  arquivos inteiros para a memória. Mapear (`memmap2`, que ele já usa para
+  procurar) é mudança no fastframe, não aqui.
+
+## 3. Terceira passada — o player que travava sem voltar (30/10/2026)
+
+**Sintoma.** Achado lendo o código, depois da §2: dois jeitos de o player
+parar para sempre sem dizer nada.
+
+### 3.1 O yt-dlp sem prazo
+
+`job.rs`: `output` esperava o yt-dlp com `wait_with_output`, sem prazo, e o
+yt-dlp não recebia `--socket-timeout`. Uma rede engasgada ou um desafio de
+JavaScript que não termina deixava a música em "Buscando o áudio" para
+sempre — e marcada em `resolving`, então nunca era pedida de novo.
+
+Agora `output(cmd, limit)` lê a saída em paralelo e confere o filho a cada
+20 ms; passado `RESOLVE_LIMIT` (60 s; uma resolução normal leva 1–4 s), volta
+`ErrorKind::TimedOut` e a tela mostra "o yt-dlp demorou demais e foi
+encerrado". O yt-dlp ganhou `--socket-timeout 15`.
+
+Encerrar só o yt-dlp não bastava: ele abre o Deno, e a versão de arquivo
+único (a do winget) é um lançador que abre o Python. Cada chamada ganha um
+job do Windows só dela, aninhado no do app (Windows 8 em diante), e o prazo
+encerra o job inteiro (`TerminateJobObject`); fechado no fim da chamada, ele
+leva junto o neto que tenha sobrado (`KILL_ON_JOB_CLOSE`). Sem jobs
+aninhados, só o filho sai, como antes.
+
+### 3.2 As threads do player sem proteção contra pânico
+
+§1.2 protegeu as threads da janela (`jobs::spawn_or`); as do player
+ficaram de fora.
+
+- Resolver, baixar, montar a fila, rádio, autoplay, instalar e manter o
+  yt-dlp: um pânico matava a thread sem resposta, e o motor esperava para
+  sempre (`resolving`, `fetching`, `installing` e `more_inflight` ligados:
+  a música parada, o rádio sem crescer até reabrir o app). Agora
+  `engine::answering` roda cada uma em `catch_unwind` e, no pânico, manda a
+  resposta de erro montada antes.
+- A thread do motor: um pânico (um índice fora da fila, por exemplo) a
+  matava calada — a tela seguia, nada mais tocava, e os comandos caíam no
+  vazio. Agora cada volta do laço (`Engine::turn`) é protegida; no pânico,
+  `recover` para o que carregava, esquece os pedidos em andamento (podem ser
+  refeitos) e publica o estado. A música que já toca segue (está no
+  callback). Depois de 20 pânicos (`MAX_PANICS`) o laço desiste, em vez de
+  virar um laço de pânicos.
+
+**Cobertura.**
+- `job::tests::a_stuck_child_is_ended_at_the_deadline`: `cmd /C ping` de
+  30 s, prazo de 0,5 s, volta `TimedOut` em ~0,6 s. Conferido à mão que o
+  `ping` (o neto) não sobra rodando.
+- `job::tests::a_quick_child_answers_with_its_output`.
+- `engine::tests::a_worker_that_panics_still_answers`.
+- `engine::tests::a_panic_in_a_message_leaves_the_player_answering`: um
+  índice fora da fila faz `prepare_next` entrar em pânico; a volta devolve
+  `false`, o que carregava é esquecido e a mensagem seguinte (volume) chega
+  ao `Snapshot`. Sem a proteção, o pânico escapa e derruba o próprio teste.
+- `engine::tests::what_was_loading_stops_after_a_panic`.
+
+**Não conferido.**
+- Um yt-dlp travado de verdade no app rodando: o prazo foi provado com o
+  `ping`, não com uma rede engasgada.
+- As mensagens novas do yt-dlp e dos pânicos são em português direto, como
+  as outras do `ytdlp.rs`; as da fila e do rádio usam `ytm_internal_error`,
+  que já existe nos três idiomas.

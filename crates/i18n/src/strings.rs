@@ -122,6 +122,72 @@ pub struct Strings {
     pub sync: &'static str,
     pub instrumental: &'static str,
     pub lyrics_by_lrclib: &'static str,
+    pub lyrics_by_netease: &'static str,
+    pub lyrics_stretched: &'static str,
+    pub lyrics_other: &'static str,
+    pub lyrics_translation: &'static str,
+    pub lyrics_translation_show: &'static str,
+    pub lyrics_translation_hide: &'static str,
+    pub look_section_lyrics: &'static str,
+    pub lyrics_style_hint: &'static str,
+    pub lyrics_font: &'static str,
+    pub font_default: &'static str,
+    pub font_serif: &'static str,
+    pub font_modern: &'static str,
+    pub font_fun: &'static str,
+    pub font_script: &'static str,
+    pub font_mono: &'static str,
+    pub lyrics_color: &'static str,
+    pub lyrics_size: &'static str,
+    pub lyrics_blur: &'static str,
+    pub lyrics_dim: &'static str,
+    pub lyrics_align: &'static str,
+    pub align_left: &'static str,
+    pub align_center: &'static str,
+    pub align_right: &'static str,
+    pub translation_same_font: &'static str,
+    pub font_search: &'static str,
+    pub fonts_loading: &'static str,
+    pub(crate) fonts_count: &'static str,
+    pub lyrics_text_group: &'static str,
+    pub lyrics_effects_group: &'static str,
+    pub translation_font: &'static str,
+    pub lyrics_romaji: &'static str,
+    pub lyrics_romaji_hint: &'static str,
+    pub translation_hint: &'static str,
+    pub translation_shape: &'static str,
+    pub translation_below: &'static str,
+    pub translation_above: &'static str,
+    pub translation_replace: &'static str,
+    pub translation_language: &'static str,
+    pub translation_app_language: &'static str,
+    pub translation_method: &'static str,
+    pub method_google: &'static str,
+    pub method_mymemory: &'static str,
+    pub method_google_hint: &'static str,
+    pub method_mymemory_hint: &'static str,
+    pub method_local: &'static str,
+    pub method_local_hint: &'static str,
+    pub local_not_found: &'static str,
+    pub local_no_model: &'static str,
+    pub local_checking: &'static str,
+    pub local_none: &'static str,
+    pub local_get_ollama: &'static str,
+    pub local_ollama_empty: &'static str,
+    pub local_download: &'static str,
+    pub local_downloading: &'static str,
+    pub local_download_failed: &'static str,
+    pub local_model: &'static str,
+    pub local_auto: &'static str,
+    pub local_using_ollama: &'static str,
+    pub local_using_libre: &'static str,
+    pub local_retry: &'static str,
+    pub translation_color: &'static str,
+    pub lyrics_style_button: &'static str,
+    pub lyrics_sample_translation: &'static str,
+    pub lyrics_searching: &'static str,
+    pub lyrics_no_other: &'static str,
+    pub(crate) lyrics_choice: &'static str,
     pub(crate) lrclib_busy: &'static str,
     pub lyrics_internal_error: &'static str,
 
@@ -129,6 +195,17 @@ pub struct Strings {
     pub nothing_to_play: &'static str,
     pub sign_in_in_window: &'static str,
     pub signed_out: &'static str,
+    /// O item do menu e o título do diálogo do cache.
+    pub storage: &'static str,
+    pub storage_hint: &'static str,
+    pub storage_lyrics: &'static str,
+    pub storage_covers: &'static str,
+    pub storage_browser: &'static str,
+    pub storage_total: &'static str,
+    pub storage_measuring: &'static str,
+    pub clear_cache: &'static str,
+    pub clear_cache_keeps: &'static str,
+    pub(crate) cache_cleared: &'static str,
     pub update_install_failed: &'static str,
     pub added_to_liked: &'static str,
     pub thanks_for_feedback: &'static str,
@@ -318,6 +395,20 @@ impl Strings {
 
     pub fn image_load_failed(&self, error: &str) -> String {
         fill(self.image_load_failed, error)
+    }
+
+    /// "397 fontes instaladas".
+    pub fn fonts_count(&self, n: usize) -> String {
+        fill(self.fonts_count, n)
+    }
+
+    /// "Letra 2 de 5".
+    pub fn lyrics_choice(&self, i: usize, n: usize) -> String {
+        self.lyrics_choice.replace("{i}", &i.to_string()).replace("{n}", &n.to_string())
+    }
+
+    pub fn cache_cleared(&self, freed: &str) -> String {
+        fill(self.cache_cleared, freed)
     }
 
     pub fn login_spawn_failed(&self, error: &str) -> String {

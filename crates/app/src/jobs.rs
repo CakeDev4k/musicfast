@@ -29,6 +29,10 @@ pub enum Reply {
     /// A fila do YouTube para a música atual: curtida, letra, relacionados.
     TrackInfo { video_id: String, result: Result<Watch, String> },
     Lyrics { video_id: String, result: Result<Option<Song>, String> },
+    /// A letra com a tradução (`lyrics::translate`).
+    Translated { video_id: String, result: Result<Song, String> },
+    /// As letras que dá para escolher em "Procurar outra letra".
+    LyricAlternatives { video_id: String, result: Result<Vec<Song>, String> },
     Related { video_id: String, result: Result<Page, String> },
     /// A capa da música atual chegou ao disco.
     Art { video_id: String, path: PathBuf },
@@ -38,6 +42,13 @@ pub enum Reply {
     Login { silent: bool, result: Result<Option<String>, String> },
     Account(Result<musicfast_ytm::Session, String>),
     Playlists(Result<Vec<Card>, String>),
+    /// Um trabalho que não tem o que dizer à tela (a busca adiantada que
+    /// não achou nada sincronizado).
+    Quiet,
+    /// O tamanho do cache, para "Armazenamento e cache".
+    Storage(crate::storage::Usage),
+    /// A limpeza do cache terminou: quanto liberou e o que sobrou.
+    CacheCleared { freed: u64, usage: crate::storage::Usage },
     /// Uma ação da conta terminou (curtir, salvar, inscrever-se).
     Done { message: String, result: Result<(), String>, refresh: Refresh },
 }
@@ -137,11 +148,80 @@ impl Jobs {
         });
     }
 
-    /// A letra sincronizada (LRCLIB), ou a do YouTube Music de reserva.
-    pub fn lyrics(&self, video_id: String, track: Track, lyrics_id: Option<String>) {
+    /// A letra da música: a guardada em `cache`, senão a sincronizada das
+    /// fontes, ou a do YouTube Music de reserva (e guarda o que achou).
+    pub fn lyrics(&self, video_id: String, track: Track, lyrics_id: Option<String>, cache: PathBuf) {
         let failed = Reply::Lyrics { video_id: video_id.clone(), result: Err(musicfast_i18n::t().lyrics_internal_error.to_owned()) };
-        self.spawn_or("letra", Some(failed), move |client, http| Reply::Lyrics {
-            result: crate::lyrics::fetch(client, http, &track, lyrics_id.as_deref()),
+        self.spawn_or("letra", Some(failed), move |client, http| {
+            if let Some(hit) = crate::lyrics::cached(&cache, &video_id) {
+                return Reply::Lyrics { result: Ok(hit), video_id };
+            }
+            let result = crate::lyrics::fetch(client, http, &track, lyrics_id.as_deref());
+            match &result {
+                Ok(Some(song)) => crate::lyrics::store(&cache, &video_id, Some(song)),
+                // "Não tem" só depois de perguntar também ao YouTube Music.
+                Ok(None) if lyrics_id.is_some() => crate::lyrics::store(&cache, &video_id, None),
+                _ => {}
+            }
+            Reply::Lyrics { result, video_id }
+        });
+    }
+
+    /// A letra da próxima da fila, adiantada: só entra (e só é guardada) se
+    /// for sincronizada; o resto fica para quando ela tocar, com a reserva do
+    /// YouTube Music.
+    pub fn prefetch_lyrics(&self, video_id: String, track: Track, cache: PathBuf) {
+        self.spawn("letra-proxima", move |client, http| {
+            if let Some(hit) = crate::lyrics::cached(&cache, &video_id) {
+                return match hit {
+                    Some(song) => Reply::Lyrics { result: Ok(Some(song)), video_id },
+                    None => Reply::Quiet,
+                };
+            }
+            match crate::lyrics::fetch(client, http, &track, None) {
+                Ok(Some(song)) if !song.lines.is_empty() => {
+                    crate::lyrics::store(&cache, &video_id, Some(&song));
+                    Reply::Lyrics { result: Ok(Some(song)), video_id }
+                }
+                _ => Reply::Quiet,
+            }
+        });
+    }
+
+    /// Traduz a letra da música para `target` ("pt") pelo `service`.
+    pub fn translate_lyrics(&self, video_id: String, song: Song, target: String, service: crate::look::TranslateService, local_model: Option<String>) {
+        let failed = Reply::Translated { video_id: video_id.clone(), result: Err(musicfast_i18n::t().lyrics_internal_error.to_owned()) };
+        self.spawn_or("traducao", Some(failed), move |_, http| Reply::Translated {
+            result: crate::lyrics::translate(http, &song, &target, service, local_model.as_deref()),
+            video_id,
+        });
+    }
+
+    /// A faxina do cache de letras (uma vez, ao abrir).
+    pub fn measure_storage(&self, paths: crate::paths::Paths) {
+        self.spawn("cache-medida", move |_, _| Reply::Storage(crate::storage::measure(&paths)));
+    }
+
+    /// `browser`: também o cache da janela de login (fechada).
+    pub fn clear_cache(&self, paths: crate::paths::Paths, browser: bool) {
+        self.spawn("cache-faxina", move |_, _| {
+            let freed = crate::storage::clear(&paths, browser);
+            Reply::CacheCleared { freed, usage: crate::storage::measure(&paths) }
+        });
+    }
+
+    pub fn clean_lyrics(&self, cache: PathBuf) {
+        self.spawn("letras-faxina", move |_, _| {
+            crate::lyrics::clean_cache(&cache);
+            Reply::Quiet
+        });
+    }
+
+    /// Todas as letras candidatas da música (para "Procurar outra letra").
+    pub fn lyric_alternatives(&self, video_id: String, track: Track, lyrics_id: Option<String>) {
+        let failed = Reply::LyricAlternatives { video_id: video_id.clone(), result: Err(musicfast_i18n::t().lyrics_internal_error.to_owned()) };
+        self.spawn_or("outras-letras", Some(failed), move |client, http| Reply::LyricAlternatives {
+            result: crate::lyrics::alternatives(client, http, &track, lyrics_id.as_deref()),
             video_id,
         });
     }

@@ -22,6 +22,9 @@ pub enum Dialog {
     /// o link digitado, a cor do seletor (em HSV, para o matiz não sumir no
     /// cinza) e se ele está aberto.
     Look { look: Look, surface: Surface, url: String, hsv: [f32; 3], custom: bool },
+    /// "Armazenamento e cache": o que o cache ocupa (`None` enquanto mede)
+    /// e se a limpeza está rodando.
+    Storage { usage: Option<crate::storage::Usage>, busy: bool },
 }
 
 /// Desenha o diálogo aberto; `true` quando ele deve fechar.
@@ -41,6 +44,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, cx: &mut Cx, images: &Imag
                 Dialog::NewPlaylist { title, privacy, track } => close = new_playlist(ui, cx, title, privacy, track),
                 Dialog::SaveTo { track } => close = save_to(ui, cx, track),
                 Dialog::Cookies { text, error } => close = cookies(ui, cx, text, error),
+                Dialog::Storage { usage, busy } => close = storage(ui, cx, *usage, busy),
                 Dialog::Look { look, surface, url, hsv, custom } => {
                     close = personalize(ui, cx, look, surface, url, hsv, custom, images, now);
                 }
@@ -153,6 +157,51 @@ fn save_to(ui: &mut Ui, cx: &mut Cx, track: &Track) -> bool {
     close
 }
 
+fn storage(ui: &mut Ui, cx: &mut Cx, usage: Option<crate::storage::Usage>, busy: &mut bool) -> bool {
+    use crate::storage::human;
+    heading(ui, t().storage);
+    ui.label(egui::RichText::new(t().storage_hint).color(theme::TEXT_DIM));
+    ui.add_space(14.0);
+    let rows = [
+        (t().storage_lyrics, usage.map(|u| u.lyrics)),
+        (t().storage_covers, usage.map(|u| u.covers)),
+        (t().storage_browser, usage.map(|u| u.browser)),
+    ];
+    let line = |ui: &mut Ui, label: &str, value: Option<u64>, strong: bool| {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+        let font = if strong { theme::semibold(15.0) } else { theme::regular(14.5) };
+        let color = if strong { theme::TEXT } else { theme::TEXT_DIM };
+        ui.painter().text(pos2(rect.left(), rect.center().y), egui::Align2::LEFT_CENTER, label, font.clone(), color);
+        let value = value.map_or_else(|| t().storage_measuring.to_owned(), human);
+        ui.painter().text(pos2(rect.right(), rect.center().y), egui::Align2::RIGHT_CENTER, value, font, theme::TEXT);
+    };
+    for (label, value) in rows {
+        line(ui, label, value, false);
+    }
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
+    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, theme::BORDER));
+    line(ui, t().storage_total, usage.map(|u| u.total()), true);
+    ui.add_space(14.0);
+    ui.label(egui::RichText::new(t().clear_cache_keeps).color(theme::TEXT_FAINT).size(13.0));
+    ui.add_space(12.0);
+    let mut close = false;
+    ui.horizontal(|ui| {
+        let ready = usage.is_some_and(|u| u.total() > 0) && !*busy;
+        let r = ui.add_enabled_ui(ready, |ui| kit::pill(ui, Some(icons::TRASH_2), t().clear_cache, true)).inner;
+        if r.clicked() && ready {
+            *busy = true;
+            cx.act(Action::ClearCache);
+        }
+        if *busy {
+            kit::spinner(ui, 18.0);
+        }
+        if kit::pill(ui, None, t().close, false).clicked() {
+            close = true;
+        }
+    });
+    close
+}
+
 fn cookies(ui: &mut Ui, cx: &mut Cx, text: &mut String, error: &mut Option<String>) -> bool {
     heading(ui, t().sign_in_with_cookies);
     for step in t().cookie_steps {
@@ -206,10 +255,28 @@ fn personalize(
 ) -> bool {
     heading(ui, t().customize_player);
     let width = ui.available_width();
-    // Qual superfície: o seletor segmentado, na largura toda.
+    // A seção: o fundo, o visualizador, a letra ou a tradução.
+    let section_id = Id::new("personalizar-secao");
+    let mut section = ui.data(|d| d.get_temp::<usize>(section_id)).unwrap_or(0);
+    let tabs = [
+        (icons::IMAGE, t().look_section_background),
+        (icons::AUDIO_WAVEFORM, t().viz_title),
+        (icons::MIC_VOCAL, t().look_section_lyrics),
+        (icons::GLOBE, t().lyrics_translation),
+    ];
+    if let Some(i) = segmented(ui, "secao", &tabs, section, width, 40.0) {
+        section = i;
+        ui.data_mut(|d| d.insert_temp(section_id, section));
+    }
+    ui.add_space(12.0);
+    // Em qual tela: só no fundo e no visualizador (a letra vale para todas).
     let items: Vec<(icons::Icon, &str)> = Surface::ALL.iter().map(|s| (s.icon(), s.label())).collect();
     let current = Surface::ALL.iter().position(|s| s == surface).unwrap_or(0);
-    if let Some(i) = segmented(ui, "superficie", &items, current, width, 40.0) {
+    let picked = if section < 2 { segmented(ui, "superficie", &items, current, width, 34.0) } else { None };
+    if section < 2 {
+        ui.add_space(14.0);
+    }
+    if let Some(i) = picked {
         let s = Surface::ALL[i];
         *surface = s;
         // A tela do player aberta atrás só quando é ela que se edita: a tela
@@ -220,16 +287,6 @@ fn personalize(
         *hsv = to_hsv(skin.color);
         *custom = !PRESETS.contains(&skin.color);
     }
-    ui.add_space(12.0);
-    // A seção: o fundo ou o visualizador.
-    let section_id = Id::new("personalizar-secao");
-    let mut section = ui.data(|d| d.get_temp::<usize>(section_id)).unwrap_or(0);
-    let tabs = [(icons::IMAGE, t().look_section_background), (icons::AUDIO_WAVEFORM, t().viz_title)];
-    if let Some(i) = segmented(ui, "secao", &tabs, section, (width * 0.6).min(320.0), 32.0) {
-        section = i;
-        ui.data_mut(|d| d.insert_temp(section_id, section));
-    }
-    ui.add_space(14.0);
 
     let image = images.get(*surface);
     let surface = *surface;
@@ -237,6 +294,15 @@ fn personalize(
     // Só para janelas muito baixas; no tamanho normal tudo cabe.
     let max_h = (ui.ctx().content_rect().height() - 210.0).max(200.0);
     egui::ScrollArea::vertical().id_salt("personalizar").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+        // A letra e a tradução valem para todas as telas.
+        if section == 2 {
+            changed |= lyrics_section(ui, &mut look.lyrics, cx.translate_lyrics, width);
+            return;
+        }
+        if section == 3 {
+            changed |= translation_section(ui, cx, &mut look.lyrics, width);
+            return;
+        }
         let skin = look.skin_mut(surface);
         if section == 0 {
             // Os cartões, um por fundo, cada um com a miniatura de como fica.
@@ -577,8 +643,9 @@ fn image_choice(ui: &mut Ui, cx: &mut Cx, skin: &mut Skin, url: &mut String, ima
 }
 
 /// As cores prontas do visualizador: vivas, para aparecer sobre o escuro.
-const VIZ_PRESETS: [[u8; 3]; 9] = [
+const VIZ_PRESETS: [[u8; 3]; 10] = [
     [255, 255, 255],
+    [170, 200, 255],
     [120, 200, 255],
     [70, 110, 255],
     [160, 100, 255],
@@ -890,5 +957,456 @@ fn gradient_editor(ui: &mut Ui, cfg: &mut VizCfg) -> bool {
         }
         ui.data_mut(|d| d.insert_temp(hsv_id, hsv));
     }
+    changed
+}
+
+
+
+
+/// A largura da coluna dos nomes nas abas da letra e da tradução.
+const LABEL: f32 = 104.0;
+
+/// Um cartão com título: o fundo um tom acima do diálogo, na largura toda.
+fn card(ui: &mut Ui, title: &str, width: f32, add: impl FnOnce(&mut Ui, f32)) {
+    if !title.is_empty() {
+        ui.label(egui::RichText::new(title).color(theme::TEXT_DIM).font(theme::semibold(12.5)));
+        ui.add_space(6.0);
+    }
+    egui::Frame::new().fill(PANEL).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::symmetric(PANEL_PAD as i8, 8)).show(ui, |ui| {
+        let inner = width - PANEL_PAD * 2.0;
+        ui.set_width(inner);
+        add(ui, inner);
+    });
+}
+
+/// Um texto de ajuda embaixo do controle, alinhado com ele.
+fn faint_hint(ui: &mut Ui, text: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(LABEL);
+        ui.add(egui::Label::new(egui::RichText::new(text).color(theme::TEXT_FAINT).font(theme::regular(12.0))).wrap());
+    });
+}
+
+/// A tradução "No meu PC": o que foi encontrado no computador (Ollama ou
+/// LibreTranslate), o modelo do Ollama, e o caminho quando falta algo
+/// (baixar o Ollama, baixar o modelo sugerido). `true` quando o estilo mudou.
+fn local_translator(ui: &mut Ui, style: &mut crate::look::LyricsStyle) -> bool {
+    use crate::local_tr;
+    let status = local_tr::status(ui.ctx());
+    let mut changed = false;
+    let indented = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+        ui.horizontal(|ui| {
+            ui.add_space(LABEL);
+            add(ui);
+        });
+    };
+    if status.checking {
+        indented(ui, &mut |ui| {
+            kit::spinner(ui, 12.0);
+            ui.label(egui::RichText::new(t().local_checking).color(theme::TEXT_FAINT).font(theme::regular(12.0)));
+        });
+        return false;
+    }
+    let pulling = status.pull.as_ref().filter(|p| p.error.is_none());
+    match &status.ollama {
+        Some(models) if !models.is_empty() => {
+            row(ui, t().local_model, |ui, w| {
+                let auto = local_tr::pick_model(models, None).unwrap_or_default();
+                let auto_label = format!("{} ({auto})", t().local_auto);
+                let mut options: Vec<(Option<String>, String)> = vec![(None, auto_label)];
+                options.extend(models.iter().map(|m| (Some(m.clone()), m.clone())));
+                if let Some(picked) = dropdown(ui, &options, &style.local_model, w) {
+                    style.local_model = picked;
+                    changed = true;
+                }
+            });
+            faint_hint(ui, t().local_using_ollama);
+        }
+        Some(_) if pulling.is_none() => {
+            faint_hint(ui, t().local_ollama_empty);
+            indented(ui, &mut |ui| {
+                let label = format!("{} ({}, ~3 GB)", t().local_download, local_tr::RECOMMENDED);
+                if kit::pill(ui, None, &label, true).clicked() {
+                    local_tr::pull(ui.ctx(), local_tr::RECOMMENDED);
+                }
+            });
+        }
+        Some(_) => {}
+        None if status.libre => faint_hint(ui, t().local_using_libre),
+        None => {
+            faint_hint(ui, t().local_none);
+            indented(ui, &mut |ui| {
+                if kit::pill(ui, Some(icons::LINK), t().local_get_ollama, true).clicked() {
+                    kit::open_in_browser("https://ollama.com/download");
+                }
+            });
+        }
+    }
+    if let Some(pull) = &status.pull {
+        match &pull.error {
+            None => indented(ui, &mut |ui| {
+                kit::spinner(ui, 12.0);
+                let pct = pull.progress.map(|p| format!(" {:.0}%", p * 100.0)).unwrap_or_default();
+                ui.label(egui::RichText::new(format!("{} {}{pct}", t().local_downloading, pull.model)).color(theme::TEXT_DIM).font(theme::regular(12.0)));
+            }),
+            Some(error) => {
+                faint_hint(ui, &format!("{} {error}", t().local_download_failed));
+                indented(ui, &mut |ui| {
+                    if kit::pill(ui, None, t().local_retry, false).clicked() {
+                        local_tr::pull(ui.ctx(), &pull.model);
+                    }
+                });
+            }
+        }
+    }
+    changed
+}
+
+/// Uma lista que abre embaixo, como a do idioma: a nova escolha, se houve.
+fn dropdown(ui: &mut Ui, options: &[(Option<String>, String)], current: &Option<String>, w: f32) -> Option<Option<String>> {
+    let shown = options.iter().find(|(v, _)| v == current).or(options.first()).map_or("", |o| o.1.as_str());
+    let (rect, response) = ui.allocate_exact_size(vec2(w, 32.0), Sense::click());
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let fill = if response.hovered() { theme::GLASS_HOVER } else { Color32::from_white_alpha(10) };
+    ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+    let g = kit::one_line(ui, shown, theme::medium(13.5), theme::TEXT, w - 40.0);
+    ui.painter().galley(pos2(rect.left() + 12.0, rect.center().y - g.size().y / 2.0), g, theme::TEXT);
+    icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(16.0, 16.0)), icons::CHEVRON_DOWN, theme::TEXT_DIM);
+    let mut picked = None;
+    egui::Popup::menu(&response).width(w).show(|ui| {
+        ui.set_width(w);
+        for (value, name) in options {
+            let selected = value == current;
+            let (r, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+            if resp.hovered() || selected {
+                ui.painter().rect_filled(r, CornerRadius::same(6), if selected { theme::GLASS_HOVER } else { theme::HOVER });
+            }
+            if selected {
+                icons::paint(ui.painter(), Rect::from_center_size(pos2(r.left() + 14.0, r.center().y), vec2(14.0, 14.0)), icons::CHECK, theme::TEXT);
+            }
+            let g = kit::one_line(ui, name, theme::regular(13.5), theme::TEXT, w - 40.0);
+            ui.painter().galley(pos2(r.left() + 30.0, r.center().y - g.size().y / 2.0), g, theme::TEXT);
+            if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                if !selected {
+                    picked = Some(value.clone());
+                }
+                ui.close();
+            }
+        }
+    });
+    picked
+}
+
+/// Uma linha de ajuste: o nome na coluna da esquerda, o controle no resto.
+fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui, f32)) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(36.0);
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let (r, _) = ui.allocate_exact_size(vec2(LABEL, 30.0), Sense::hover());
+        let g = kit::one_line(ui, label, theme::regular(13.0), theme::TEXT_DIM, LABEL - 8.0);
+        ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, theme::TEXT_DIM);
+        let rest = ui.available_width();
+        ui.spacing_mut().item_spacing.x = 6.0;
+        add(ui, rest);
+    });
+}
+
+/// Um controle deslizante numa linha: trilha e valor, na largura `width`.
+fn slider_inline(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, show: fn(f32) -> String, width: f32) -> bool {
+    let before = *value;
+    let value_w = 48.0;
+    let (rect, response) = ui.allocate_exact_size(vec2(width - value_w, 30.0), Sense::click_and_drag());
+    let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 14.0, 4.0));
+    let (lo, hi) = (*range.start(), *range.end());
+    if let Some(p) = response.interact_pointer_pos()
+        && (response.dragged() || response.clicked() || response.is_pointer_button_down_on())
+    {
+        *value = lo + (hi - lo) * ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+    }
+    let f = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let x = track.left() + track.width() * f;
+    ui.painter().rect_filled(track, CornerRadius::same(2), Color32::from_white_alpha(40));
+    ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(x, track.bottom())), CornerRadius::same(2), theme::TEXT);
+    let active = response.hovered() || response.dragged();
+    ui.painter().circle_filled(pos2(x, track.center().y), if active { 7.5 } else { 6.5 }, theme::TEXT);
+    response.on_hover_cursor(CursorIcon::PointingHand);
+    let (v, _) = ui.allocate_exact_size(vec2(value_w, 30.0), Sense::hover());
+    ui.painter().text(v.right_center(), egui::Align2::RIGHT_CENTER, show(*value), theme::medium(12.5), theme::TEXT);
+    *value != before
+}
+
+/// Escolha entre poucas opções de texto, como o seletor de seção: partes
+/// iguais e o destaque branco. A nova escolha, se houve clique.
+fn choice(ui: &mut Ui, id: &str, labels: &[&str], current: usize, width: f32) -> Option<usize> {
+    let h = 30.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(15), Color32::from_white_alpha(10));
+    let seg = (rect.width() - 6.0) / labels.len().max(1) as f32;
+    let at = ui.ctx().animate_value_with_time(Id::new((id, "destaque")), current as f32, 0.18);
+    let slot = |i: f32| Rect::from_min_size(pos2(rect.left() + 3.0 + seg * i, rect.top() + 3.0), vec2(seg, h - 6.0));
+    ui.painter().rect_filled(slot(at), CornerRadius::same(12), theme::TEXT);
+    let mut picked = None;
+    for (i, label) in labels.iter().enumerate() {
+        let r = slot(i as f32);
+        let resp = ui.interact(r, Id::new((id, i)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        let cover = (1.0 - (at - i as f32).abs()).clamp(0.0, 1.0);
+        let idle = if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+        let color = idle.lerp_to_gamma(Color32::BLACK, cover);
+        let font = if i == current { theme::semibold(12.5) } else { theme::medium(12.5) };
+        let g = kit::one_line(ui, label, font, color, seg - 10.0);
+        ui.painter().galley(r.center() - g.size() / 2.0, g, color);
+        if resp.clicked() && i != current {
+            picked = Some(i);
+        }
+    }
+    picked
+}
+
+/// As cores prontas e o "+", que abre embaixo o seletor de qualquer cor (o
+/// quadro de tom e brilho, a faixa do matiz e o código). `true` quando mudou.
+fn color_row(ui: &mut Ui, id: &str, color: &mut [u8; 3]) -> bool {
+    let open_id = Id::new((id, "aberto"));
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    let custom = !VIZ_PRESETS.contains(color);
+    let mut changed = false;
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            changed |= swatches(ui, color);
+            let (rect, response) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
+            let c = rect.center();
+            if custom || open {
+                ui.painter().circle_filled(c, 10.0, Color32::from_rgb(color[0], color[1], color[2]));
+                if custom {
+                    ui.painter().circle_stroke(c, 11.5, Stroke::new(2.0, theme::TEXT));
+                }
+                icons::paint(ui.painter(), rect.shrink(7.0), icons::PLUS, Color32::from_white_alpha(200));
+            } else {
+                ui.painter().circle_filled(c, 10.0, if response.hovered() { theme::GLASS_HOVER } else { theme::GLASS });
+                icons::paint(ui.painter(), rect.shrink(7.0), icons::PLUS, theme::TEXT);
+            }
+            if response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(t().custom_color).clicked() {
+                open = !open;
+                ui.data_mut(|d| d.insert_temp(open_id, open));
+            }
+        });
+        if open {
+            ui.add_space(8.0);
+            let hsv_id = Id::new((id, "hsv"));
+            let mut hsv = ui.data(|d| d.get_temp::<[f32; 3]>(hsv_id)).unwrap_or_else(|| to_hsv(*color));
+            if Color32::from_rgb(color[0], color[1], color[2]) != Color32::from(Hsva::new(hsv[0], hsv[1], hsv[2], 1.0)) {
+                hsv = to_hsv(*color);
+            }
+            if hsv_picker_on(ui, &mut hsv, PANEL) {
+                let c = Color32::from(Hsva::new(hsv[0], hsv[1], hsv[2], 1.0));
+                *color = [c.r(), c.g(), c.b()];
+                changed = true;
+            }
+            ui.data_mut(|d| d.insert_temp(hsv_id, hsv));
+        }
+    });
+    changed
+}
+
+/// O seletor de fonte: o botão com o nome da escolhida e, ao clicar, a lista
+/// das fontes instaladas com busca. `default`: o nome da primeira opção
+/// (`None` na fonte). `true` quando mudou.
+fn font_picker(ui: &mut Ui, id: &str, font: &mut Option<String>, default: &str, width: f32) -> bool {
+    let mut changed = false;
+    let label = font.clone().unwrap_or_else(|| default.to_owned());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let fill = if response.hovered() { theme::GLASS_HOVER } else { Color32::from_white_alpha(10) };
+    ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+    let g = kit::one_line(ui, &label, theme::medium(13.5), theme::TEXT, width - 40.0);
+    ui.painter().galley(pos2(rect.left() + 12.0, rect.center().y - g.size().y / 2.0), g, theme::TEXT);
+    let chevron = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(16.0, 16.0));
+    icons::paint(ui.painter(), chevron, icons::CHEVRON_DOWN, theme::TEXT_DIM);
+    let search_id = Id::new((id, "busca"));
+    // A lista abre maior que o botão: cada fonte escrita nela mesma.
+    let menu_w = width.max(420.0);
+    egui::Popup::menu(&response).width(menu_w).show(|ui| {
+        ui.set_width(menu_w);
+        let Some(families) = crate::fonts::families(ui.ctx()) else {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                kit::spinner(ui, 16.0);
+                ui.label(egui::RichText::new(t().fonts_loading).color(theme::TEXT_DIM));
+            });
+            ui.add_space(10.0);
+            return;
+        };
+        // A busca, com a lupa, e quantas fontes há.
+        let mut query = ui.data(|d| d.get_temp::<String>(search_id)).unwrap_or_default();
+        let (field, _) = ui.allocate_exact_size(vec2(menu_w, 38.0), Sense::hover());
+        ui.painter().rect_filled(field, CornerRadius::same(8), Color32::from_white_alpha(12));
+        icons::paint(ui.painter(), Rect::from_center_size(pos2(field.left() + 18.0, field.center().y), vec2(16.0, 16.0)), icons::SEARCH, theme::TEXT_DIM);
+        let mut edit_ui = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(field.left() + 34.0, field.top()), pos2(field.right() - 8.0, field.bottom()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let edit = edit_ui.add(
+            egui::TextEdit::singleline(&mut query)
+                .frame(egui::Frame::NONE)
+                .hint_text(egui::RichText::new(t().font_search).color(theme::TEXT_FAINT))
+                .font(theme::regular(14.5))
+                .desired_width(f32::INFINITY),
+        );
+        edit.request_focus();
+        ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
+        ui.add_space(8.0);
+
+        let needle = query.to_lowercase();
+        let mut options: Vec<(&str, Option<&str>)> = Vec::new();
+        if needle.is_empty() {
+            options.push((default, None));
+        }
+        options.extend(families.iter().filter(|f| needle.is_empty() || f.name.to_lowercase().contains(&needle)).map(|f| (f.name.as_str(), Some(f.name.as_str()))));
+        const ROW: f32 = 46.0;
+        egui::ScrollArea::vertical().max_height(400.0).auto_shrink([false, true]).show_rows(ui, ROW, options.len(), |ui, range| {
+            // Só as visíveis ganham a prévia (algumas por quadro).
+            let visible: Vec<&str> = options[range.clone()].iter().filter_map(|o| o.1).collect();
+            crate::fonts::want_previews(ui.ctx(), &visible);
+            for (label, value) in &options[range] {
+                let selected = font.as_deref() == *value;
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+                if resp.hovered() || selected {
+                    ui.painter().rect_filled(r.shrink2(vec2(0.0, 2.0)), CornerRadius::same(8), if selected { theme::GLASS_HOVER } else { theme::HOVER });
+                }
+                if selected {
+                    icons::paint(ui.painter(), Rect::from_center_size(pos2(r.left() + 18.0, r.center().y), vec2(15.0, 15.0)), icons::CHECK, theme::TEXT);
+                }
+                // O nome na própria fonte; sem prévia (ainda chegando, ou a
+                // fonte é grande demais), na fonte do app, apagado.
+                let (font_id, color) = match value.and_then(|v| crate::fonts::preview(ui.ctx(), v, 19.0)) {
+                    Some(f) => (f, theme::TEXT),
+                    None if value.is_none() => (theme::medium(16.0), theme::TEXT),
+                    None => (theme::regular(15.0), theme::TEXT_DIM),
+                };
+                let g = kit::one_line(ui, label, font_id, color, r.width() - 50.0);
+                ui.painter().galley(pos2(r.left() + 38.0, r.center().y - g.size().y / 2.0), g, color);
+                if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    let value = value.map(str::to_owned);
+                    if *font != value {
+                        *font = value;
+                        changed = true;
+                    }
+                    ui.close();
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(t().fonts_count(families.len())).color(theme::TEXT_FAINT).font(theme::regular(12.0)));
+    });
+    changed
+}
+
+/// A aba "Letra": a amostra, o texto (fonte, tamanho, alinhamento) e a cor e
+/// os efeitos (cor, desfoque, as outras linhas, romaji). `true` quando mudou.
+fn lyrics_section(ui: &mut Ui, style: &mut crate::look::LyricsStyle, translate: bool, width: f32) -> bool {
+    use crate::look::{LyricsStyle, TextAlign};
+    let mut changed = false;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 118.0 * style.size.max(1.0)), Sense::hover());
+    super::lyrics_view::preview(ui, rect, style, translate);
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(t().lyrics_style_hint).color(theme::TEXT_FAINT).font(theme::regular(12.0)));
+    ui.add_space(12.0);
+    let percent: fn(f32) -> String = |v| format!("{:.0}%", v * 100.0);
+    card(ui, t().lyrics_text_group, width, |ui, _| {
+        row(ui, t().lyrics_font, |ui, w| changed |= font_picker(ui, "fonte-letra", &mut style.font_family, t().font_default, w));
+        row(ui, t().lyrics_size, |ui, w| changed |= slider_inline(ui, &mut style.size, LyricsStyle::SIZE, percent, w));
+        row(ui, t().lyrics_align, |ui, w| {
+            let labels: Vec<&str> = TextAlign::ALL.iter().map(|a| a.label()).collect();
+            let current = TextAlign::ALL.iter().position(|a| *a == style.align).unwrap_or(0);
+            if let Some(i) = choice(ui, "alinhamento", &labels, current, w) {
+                style.align = TextAlign::ALL[i];
+                changed = true;
+            }
+        });
+    });
+    ui.add_space(12.0);
+    card(ui, t().lyrics_effects_group, width, |ui, inner| {
+        row(ui, t().lyrics_color, |ui, _| changed |= color_row(ui, "cor-letra", &mut style.color));
+        row(ui, t().lyrics_blur, |ui, w| changed |= slider_inline(ui, &mut style.blur, 0.0..=1.0, percent, w));
+        row(ui, t().lyrics_dim, |ui, w| changed |= slider_inline(ui, &mut style.dim, LyricsStyle::DIM, percent, w));
+        if toggle_row(ui, t().lyrics_romaji, t().lyrics_romaji_hint, style.romaji, inner) {
+            style.romaji = !style.romaji;
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// A aba "Tradução": ligar e desligar, a amostra, e a forma, o idioma, o
+/// serviço, a fonte e a cor. `true` quando o estilo mudou (ligar e
+/// desligar vai por ação).
+fn translation_section(ui: &mut Ui, cx: &mut Cx, style: &mut crate::look::LyricsStyle, width: f32) -> bool {
+    use crate::look::{TRANSLATION_LANGS, TranslateService, TranslationMode};
+    let mut changed = false;
+    card(ui, "", width, |ui, inner| {
+        if toggle_row(ui, t().lyrics_translation, t().translation_hint, cx.translate_lyrics, inner) {
+            cx.act(Action::ToggleTranslation);
+        }
+    });
+    ui.add_space(12.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 118.0 * style.size.max(1.0)), Sense::hover());
+    super::lyrics_view::preview(ui, rect, style, cx.translate_lyrics);
+    ui.add_space(12.0);
+    card(ui, "", width, |ui, _| {
+        row(ui, t().translation_shape, |ui, w| {
+            let modes = [TranslationMode::Below, TranslationMode::Above, TranslationMode::Replace];
+            let current = modes.iter().position(|m| *m == style.translation).unwrap_or(0);
+            if let Some(i) = choice(ui, "forma", &[t().translation_below, t().translation_above, t().translation_replace], current, w) {
+                style.translation = modes[i];
+                changed = true;
+            }
+        });
+        row(ui, t().translation_language, |ui, w| {
+            // Uma lista, como a da fonte: o idioma do app e os outros.
+            let mut options: Vec<(Option<String>, &str)> = vec![(None, t().translation_app_language)];
+            options.extend(TRANSLATION_LANGS.iter().map(|(code, name)| (Some((*code).to_owned()), *name)));
+            let current = options.iter().find(|(code, _)| *code == style.translation_lang).map_or(t().translation_app_language, |o| o.1);
+            let (rect, response) = ui.allocate_exact_size(vec2(w, 32.0), Sense::click());
+            let response = response.on_hover_cursor(CursorIcon::PointingHand);
+            let fill = if response.hovered() { theme::GLASS_HOVER } else { Color32::from_white_alpha(10) };
+            ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+            let g = kit::one_line(ui, current, theme::medium(13.5), theme::TEXT, w - 40.0);
+            ui.painter().galley(pos2(rect.left() + 12.0, rect.center().y - g.size().y / 2.0), g, theme::TEXT);
+            icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(16.0, 16.0)), icons::CHEVRON_DOWN, theme::TEXT_DIM);
+            egui::Popup::menu(&response).width(w).show(|ui| {
+                ui.set_width(w);
+                for (code, name) in options {
+                    let selected = style.translation_lang == code;
+                    let (r, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+                    if resp.hovered() || selected {
+                        ui.painter().rect_filled(r, CornerRadius::same(6), if selected { theme::GLASS_HOVER } else { theme::HOVER });
+                    }
+                    if selected {
+                        icons::paint(ui.painter(), Rect::from_center_size(pos2(r.left() + 14.0, r.center().y), vec2(14.0, 14.0)), icons::CHECK, theme::TEXT);
+                    }
+                    ui.painter().text(pos2(r.left() + 30.0, r.center().y), egui::Align2::LEFT_CENTER, name, theme::regular(13.5), theme::TEXT);
+                    if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        if !selected {
+                            style.translation_lang = code;
+                            changed = true;
+                        }
+                        ui.close();
+                    }
+                }
+            });
+        });
+        row(ui, t().translation_method, |ui, w| {
+            let labels: Vec<&str> = TranslateService::ALL.iter().map(|s| s.label()).collect();
+            let current = TranslateService::ALL.iter().position(|s| *s == style.service).unwrap_or(0);
+            if let Some(i) = choice(ui, "metodo", &labels, current, w) {
+                style.service = TranslateService::ALL[i];
+                changed = true;
+            }
+        });
+        if style.service == TranslateService::Local {
+            changed |= local_translator(ui, style);
+        } else {
+            faint_hint(ui, style.service.hint());
+        }
+        ui.add_space(4.0);
+        row(ui, t().translation_font, |ui, w| changed |= font_picker(ui, "fonte-traducao", &mut style.translation_font, t().translation_same_font, w));
+        row(ui, t().translation_color, |ui, _| changed |= color_row(ui, "cor-traducao", &mut style.translation_color));
+    });
     changed
 }

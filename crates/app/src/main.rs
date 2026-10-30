@@ -9,14 +9,17 @@
 mod app;
 mod bench;
 mod covers;
+mod fonts;
 mod icon;
 mod jobs;
+mod local_tr;
 mod login;
 mod look;
 mod lyrics;
 mod viz;
 mod paths;
 mod state;
+mod storage;
 mod ui;
 mod update;
 mod vault;

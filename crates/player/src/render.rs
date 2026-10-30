@@ -82,6 +82,9 @@ pub struct Shared {
     pub gain: AtomicU32,
     pub out_rate: AtomicU32,
     pub scope: Scope,
+    /// O relógio da saída aberta: diz a latência do dispositivo (o tempo
+    /// entre entregar uma amostra e ela sair no fone; ~200 ms no Bluetooth).
+    pub clock: std::sync::Mutex<Option<fastframe_audio::Clock>>,
 }
 
 struct Playing {

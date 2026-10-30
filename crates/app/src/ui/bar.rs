@@ -147,7 +147,11 @@ fn controls(ui: &mut Ui, cx: &mut Cx, rect: Rect, snap: &Snapshot, position: f64
                 })
                 .collect();
             ui.painter().add(Shape::line(points, Stroke::new(3.0, theme::TEXT)));
-            ui.ctx().request_repaint();
+            // ~30 quadros por segundo bastam para o arco girar liso. Sem o
+            // prazo, a janela inteira era refeita na taxa do monitor (144 Hz
+            // num de 144) durante toda a resolução do yt-dlp, que na primeira
+            // instalação passa de um minuto.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
         }
         Status::Playing => icons::paint_filled(ui.painter(), Rect::from_center_size(r.center(), vec2(34.0, 34.0)), icons::PAUSE, color),
         _ => icons::paint_filled(ui.painter(), Rect::from_center_size(r.center() + vec2(2.0, 0.0), vec2(36.0, 36.0)), icons::PLAY, color),

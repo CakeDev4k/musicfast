@@ -45,7 +45,32 @@ pub enum FetchError {
     Other(String),
 }
 
-pub fn fetch(http: &reqwest::blocking::Client, r: &Resolved) -> Result<Arc<[u8]>, FetchError> {
+/// Os bytes de uma música, divididos entre o cache do player e o
+/// decodificador sem cópia. `Arc<Vec<u8>>` e não `Arc<[u8]>`: converter o
+/// `Vec` baixado em `Arc<[u8]>` copiava a música inteira e dobrava o pico de
+/// memória do download (60 MB a mais num mix de 1 h).
+#[derive(Clone)]
+pub struct Audio(Arc<Vec<u8>>);
+
+impl Audio {
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl From<Vec<u8>> for Audio {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(Arc::new(bytes))
+    }
+}
+
+impl AsRef<[u8]> for Audio {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+pub fn fetch(http: &reqwest::blocking::Client, r: &Resolved) -> Result<Audio, FetchError> {
     let started = std::time::Instant::now();
     // O endereço do cliente de TV leva 403 até o `available_at` (o yt-dlp
     // dorme o mesmo tempo antes de baixar). Teto de 10 s: além disso, a
@@ -91,7 +116,11 @@ pub fn fetch(http: &reqwest::blocking::Client, r: &Resolved) -> Result<Arc<[u8]>
         return Err(FetchError::Other(musicfast_i18n::t().audio_empty.into()));
     }
     log::info!("{}: {} kB em {} ms", r.video_id, data.len() / 1024, started.elapsed().as_millis());
-    Ok(data.into())
+    // Sem o tamanho de antemão, o `Vec` cresceu dobrando: a sobra sai.
+    if data.capacity() > data.len() + data.len() / 8 {
+        data.shrink_to_fit();
+    }
+    Ok(Audio(Arc::new(data)))
 }
 
 pub struct Decoder {
@@ -108,7 +137,7 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    pub fn open(bytes: Arc<[u8]>) -> Result<Self, String> {
+    pub fn open(bytes: Audio) -> Result<Self, String> {
         let t = musicfast_i18n::t();
         let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();

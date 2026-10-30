@@ -78,6 +78,22 @@ pub struct MusicApp {
     /// A última posição e tamanho com a janela normal (`state::WindowGeom`).
     window: Option<crate::state::WindowGeom>,
     lyrics: HashMap<String, LyricsState>,
+    /// As letras que falharam por erro (rede, LRCLIB ocupado): quando e
+    /// quantas vezes, para pedir de novo sozinho.
+    lyrics_failed: HashMap<String, (Instant, u8)>,
+    /// As letras candidatas de cada música (as de "Procurar outra letra") e
+    /// se a troca está esperando a lista chegar.
+    lyric_alts: HashMap<String, Vec<crate::lyrics::Song>>,
+    lyric_alts_waiting: Option<String>,
+    /// A tradução da letra: ligada, as músicas sendo traduzidas e as que
+    /// falharam (não pede de novo nesta sessão).
+    translate_lyrics: bool,
+    translating: std::collections::HashSet<String>,
+    translate_failed: std::collections::HashSet<String>,
+    /// As fontes da letra e da tradução já postas no egui.
+    lyrics_fonts: crate::look::LyricsFonts,
+    /// A próxima da fila cuja letra já foi pedida adiantada.
+    lyrics_prefetched: Option<String>,
     info: HashMap<String, TrackInfo>,
     related: HashMap<String, PageState>,
     bar: BarState,
@@ -187,6 +203,7 @@ impl MusicApp {
             jobs.playlists();
         }
         jobs.load(View::Home);
+        jobs.clean_lyrics(paths.lyrics.clone());
         let waker = ctx.clone();
         let controls = np::NowPlaying::start(np::App::new("musicfast", "MusicFast"), move || waker.request_repaint());
         Self {
@@ -211,6 +228,14 @@ impl MusicApp {
             round_corners: None,
             window: saved.window.filter(crate::state::WindowGeom::is_sane),
             lyrics: HashMap::new(),
+            lyrics_failed: HashMap::new(),
+            lyric_alts: HashMap::new(),
+            lyric_alts_waiting: None,
+            lyrics_prefetched: None,
+            translate_lyrics: saved.translate_lyrics,
+            translating: std::collections::HashSet::new(),
+            translate_failed: std::collections::HashSet::new(),
+            lyrics_fonts: crate::look::LyricsFonts::default(),
             bar: BarState { seeking: None, unmuted: saved.volume.max(0.1) },
             warmed: None,
             toast: None,
@@ -363,6 +388,11 @@ impl MusicApp {
                 }
             },
             Action::Dialog(d) => self.dialog = Some(d),
+            Action::Storage => {
+                self.dialog = Some(Dialog::Storage { usage: None, busy: false });
+                self.jobs.measure_storage(self.paths.clone());
+            }
+            Action::ClearCache => self.jobs.clear_cache(self.paths.clone(), !self.me.signing_in),
             Action::Rate(video_id, status) => {
                 self.me.likes.insert(video_id.clone(), status);
                 let message = match status {
@@ -393,6 +423,16 @@ impl MusicApp {
                 self.jobs.act(message, Refresh::Playlists, move |c| c.create_playlist(&title, privacy, &videos).map(|_| ()));
             }
             Action::SetLanguage(choice) => self.set_language(choice),
+            Action::OtherLyrics(video_id) => self.other_lyrics(ctx, video_id),
+            Action::ToggleTranslation => {
+                self.translate_lyrics = !self.translate_lyrics;
+                // Ligar de novo tenta de novo as que tinham falhado.
+                self.translate_failed.clear();
+            }
+            Action::PersonalizeLyrics => {
+                self.apply(ctx, Action::Personalize);
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new("personalizar-secao"), 2usize));
+            }
             Action::Personalize => {
                 self.expanded = self.snap.current().is_some();
                 let skin = &self.look.player;
@@ -405,6 +445,10 @@ impl MusicApp {
                 });
             }
             Action::SetLook(look) => {
+                // Outro idioma ou serviço de tradução: as que falharam tentam de novo.
+                if look.lyrics.translation_key() != self.look.lyrics.translation_key() {
+                    self.translate_failed.clear();
+                }
                 self.look = look;
                 self.backdrops.sync(ctx, &self.look);
             }
@@ -422,6 +466,48 @@ impl MusicApp {
                 });
                 self.picking = Some(rx);
             }
+        }
+    }
+
+    /// "Procurar outra letra": a próxima candidata diferente da que está na
+    /// tela. A lista é buscada na primeira vez; a troca espera ela chegar.
+    fn other_lyrics(&mut self, ctx: &egui::Context, video_id: String) {
+        let Some(alts) = self.lyric_alts.get(&video_id) else {
+            if self.lyric_alts_waiting.as_deref() == Some(video_id.as_str()) {
+                return;
+            }
+            let Some(track) = self.snap.current().filter(|t| t.video_id == video_id).cloned() else { return };
+            let lyrics_id = self.info.get(&video_id).and_then(|i| i.lyrics_id.clone());
+            self.lyric_alts_waiting = Some(video_id.clone());
+            self.jobs.lyric_alternatives(video_id, track, lyrics_id);
+            self.say(ctx, t().lyrics_searching);
+            return;
+        };
+        let current = match self.lyrics.get(&video_id) {
+            Some(LyricsState::Ready(Some(song))) => crate::lyrics::fingerprint(song),
+            _ => String::new(),
+        };
+        let at = alts.iter().position(|s| crate::lyrics::fingerprint(s) == current);
+        // A seguinte à da tela (ou a primeira), dando a volta.
+        let next = match at {
+            Some(i) if alts.len() > 1 => Some((i + 1) % alts.len()),
+            Some(_) => None,
+            None => (!alts.is_empty()).then_some(0),
+        };
+        match next {
+            Some(i) => {
+                let message = t().lyrics_choice(i + 1, alts.len());
+                let mut chosen = alts[i].clone();
+                // Quem trocou de letra segue podendo trocar.
+                chosen.doubtful = true;
+                let dir = self.paths.lyrics.clone();
+                let id = video_id.clone();
+                let keep = chosen.clone();
+                let _ = std::thread::Builder::new().name("letra-escolhida".into()).spawn(move || crate::lyrics::store(&dir, &id, Some(&keep)));
+                self.lyrics.insert(video_id.clone(), LyricsState::Ready(Some(chosen)));
+                self.say(ctx, &message);
+            }
+            None => self.say(ctx, t().lyrics_no_other),
         }
     }
 
@@ -583,15 +669,80 @@ impl MusicApp {
                 }
                 Reply::Lyrics { video_id, result } => {
                     let state = match result {
-                        Ok(lyrics) => LyricsState::Ready(lyrics),
-                        Err(error) => LyricsState::Failed(error),
+                        Ok(lyrics) => {
+                            self.lyrics_failed.remove(&video_id);
+                            LyricsState::Ready(lyrics)
+                        }
+                        Err(error) => {
+                            log::info!("letra: {error}");
+                            let tries = self.lyrics_failed.get(&video_id).map_or(0, |f| f.1);
+                            self.lyrics_failed.insert(video_id.clone(), (Instant::now(), tries + 1));
+                            LyricsState::Failed(error)
+                        }
                     };
                     self.lyrics.insert(video_id, state);
+                }
+                Reply::Quiet => {}
+                Reply::Translated { video_id, result } => {
+                    self.translating.remove(&video_id);
+                    match result {
+                        // Só se a letra na tela ainda é a que foi traduzida
+                        // (a pessoa pode ter trocado com "Outra letra").
+                        Ok(song) => {
+                            let same = matches!(self.lyrics.get(&video_id), Some(LyricsState::Ready(Some(now))) if crate::lyrics::fingerprint(now) == crate::lyrics::fingerprint(&song));
+                            if same {
+                                let (dir, id, keep) = (self.paths.lyrics.clone(), video_id.clone(), song.clone());
+                                let _ = std::thread::Builder::new().name("letra-traduzida".into()).spawn(move || crate::lyrics::store(&dir, &id, Some(&keep)));
+                                self.lyrics.insert(video_id, LyricsState::Ready(Some(song)));
+                            }
+                        }
+                        Err(error) => {
+                            log::info!("tradução da letra: {error}");
+                            self.translate_failed.insert(video_id);
+                        }
+                    }
+                }
+                Reply::LyricAlternatives { video_id, result } => {
+                    let waiting = self.lyric_alts_waiting.as_deref() == Some(video_id.as_str());
+                    if waiting {
+                        self.lyric_alts_waiting = None;
+                    }
+                    match result {
+                        Ok(alts) => {
+                            if self.lyric_alts.len() >= 20 {
+                                self.lyric_alts.clear();
+                            }
+                            self.lyric_alts.insert(video_id.clone(), alts);
+                            if waiting {
+                                self.other_lyrics(ctx, video_id);
+                            }
+                        }
+                        Err(error) => {
+                            log::info!("outras letras: {error}");
+                            self.say(ctx, t().lyrics_no_other);
+                        }
+                    }
                 }
                 Reply::Art { video_id, path } => {
                     if self.snap.current().is_some_and(|t| t.video_id == video_id) && path.exists() {
                         self.art = Some((video_id, path));
                     }
+                }
+                Reply::Storage(measured) => {
+                    if let Some(Dialog::Storage { usage, .. }) = self.dialog.as_mut() {
+                        *usage = Some(measured);
+                    }
+                }
+                Reply::CacheCleared { freed, usage: left } => {
+                    if let Some(Dialog::Storage { usage, busy }) = self.dialog.as_mut() {
+                        *usage = Some(left);
+                        *busy = false;
+                    }
+                    // A capa da atual saiu do disco: os controles do Windows
+                    // pedem de novo.
+                    self.art_for = None;
+                    self.art = None;
+                    self.say(ctx, &t().cache_cleared(&crate::storage::human(freed)));
                 }
                 Reply::Version(version) => {
                     self.saved.version_checked = unix_now();
@@ -859,6 +1010,7 @@ impl MusicApp {
             if self.info.len() >= 300 {
                 self.info.retain(|k, _| *k == id);
                 self.lyrics.retain(|k, _| *k == id);
+                self.lyrics_failed.retain(|k, _| *k == id);
             }
             if self.related.len() >= 12 {
                 self.related.retain(|k, _| *k == id);
@@ -870,12 +1022,48 @@ impl MusicApp {
         let lyrics_shown = self.side == Some(Side::Lyrics)
             || (self.expanded && self.player_tab == Tab::Lyrics)
             || self.mini.as_ref().is_some_and(|m| m.lyrics);
+        // A que falhou por erro (o LRCLIB vive ocupado) é pedida de novo
+        // depois de um tempo, até três vezes.
+        if lyrics_shown
+            && let Some((at, tries)) = self.lyrics_failed.get(&id)
+            && *tries < 3
+            && at.elapsed() > Duration::from_secs(20)
+            && matches!(self.lyrics.get(&id), Some(LyricsState::Failed(_)))
+        {
+            self.lyrics.remove(&id);
+        }
         // Espera a resposta da fila: a letra do YouTube Music (a reserva)
         // vem com o id dela.
         if lyrics_shown && !self.lyrics.contains_key(&id) && info.answered {
             let (track, lyrics_id) = (track.clone(), info.lyrics_id.clone());
             self.lyrics.insert(id.clone(), LyricsState::Loading);
-            self.jobs.lyrics(id.clone(), track, lyrics_id);
+            self.jobs.lyrics(id.clone(), track, lyrics_id, self.paths.lyrics.clone());
+        }
+        // A tradução, quando ligada e a letra ainda não foi ao tradutor (ou
+        // foi para outro idioma do app). A marca do idioma é montada só aqui:
+        // antes eram duas `String` por quadro, com ou sem letra na tela.
+        if lyrics_shown
+            && self.translate_lyrics
+            && !self.translating.contains(&id)
+            && !self.translate_failed.contains(&id)
+            && let Some(LyricsState::Ready(Some(song))) = self.lyrics.get(&id)
+            && !song.lines.is_empty()
+            && song.translated_to.as_deref() != Some(self.look.lyrics.translation_key().as_str())
+        {
+            self.translating.insert(id.clone());
+            self.jobs.translate_lyrics(id.clone(), song.clone(), self.look.lyrics.target(), self.look.lyrics.service, self.look.lyrics.local_model.clone());
+        }
+        // Com a letra na tela e a da atual pronta, a da próxima vem adiantada.
+        if lyrics_shown
+            && matches!(self.lyrics.get(&id), Some(LyricsState::Ready(_)))
+            && let Some(next) = self.snap.index.and_then(|i| self.snap.queue.get(i + 1))
+            && !next.video_id.is_empty()
+            && !self.lyrics.contains_key(&next.video_id)
+            && self.lyrics_prefetched.as_deref() != Some(next.video_id.as_str())
+        {
+            let next = next.clone();
+            self.lyrics_prefetched = Some(next.video_id.clone());
+            self.jobs.prefetch_lyrics(next.video_id.clone(), next, self.paths.lyrics.clone());
         }
         let info = &self.info[&id];
         if self.expanded
@@ -912,6 +1100,7 @@ impl MusicApp {
             window: self.window,
             language: self.language.map(|l| l.code().to_owned()),
             look: self.look.clone(),
+            translate_lyrics: self.translate_lyrics,
         }
     }
 
@@ -1007,6 +1196,7 @@ impl MusicApp {
     /// O quadro do mini player: só ele, sem a página por trás.
     fn mini_ui(&mut self, ui: &mut Ui, mut actions: Vec<Action>, position: f64) {
         let ctx = ui.ctx().clone();
+        let mini_latency = self.player.latency();
         let Some(lyrics_open) = self.mini.as_ref().map(|m| m.lyrics) else { return };
         // Guarda onde a pessoa o arrastou (quando a janela já tem o tamanho
         // pedido: no meio de uma troca, o retângulo ainda é o de antes).
@@ -1021,7 +1211,7 @@ impl MusicApp {
         let lyrics = lyrics_open.then(|| current.as_ref().and_then(|id| self.lyrics.get(id)));
         let mut out = mini::Out::default();
         egui::CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
-            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, current: current.clone(), playing };
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency: mini_latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
             let skin = &self.look.mini;
             let backdrop = if *skin == crate::look::Skin::default() {
                 None
@@ -1346,14 +1536,17 @@ impl eframe::App for MusicApp {
         if viz_on {
             self.analyzer.update(&self.player, ctx.input(|i| i.time));
             if self.snap.status == Status::Playing || self.analyzer.moving() {
-                ctx.request_repaint();
+                ctx.request_repaint_after(crate::viz::FRAME);
             }
         }
+        crate::look::ensure_lyrics_fonts(&ctx, &self.look.lyrics, &mut self.lyrics_fonts);
+        crate::fonts::drop_previews_when_closed(&ctx);
         self.scrolling.apply(&ctx);
         self.covers.begin_frame(&ctx);
         let mut actions = Vec::new();
         self.shortcuts(&ctx, &mut actions);
         let position = self.player.position();
+        let latency = self.player.latency();
         if let Some(round) = self.round_corners.take() {
             round_corners(_frame, round);
         }
@@ -1391,7 +1584,7 @@ impl eframe::App for MusicApp {
             .resizable(false)
             .frame(Frame::new().fill(bar::BG))
             .show(ui, |ui| {
-                let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, current: current.clone(), playing };
+                let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
                 let skin = &self.look.bar;
                 if *skin != crate::look::Skin::default() {
                     let cover = self.snap.current().filter(|_| skin.wants_cover()).and_then(|t| cx.covers.color(&t.thumbs));
@@ -1415,7 +1608,7 @@ impl eframe::App for MusicApp {
                 .resizable(true)
         };
         let shown = panel.frame(Frame::new().fill(egui::Color32::from_black_alpha(70))).show(ui, |ui| {
-            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, current: current.clone(), playing };
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
             nav::sidebar(ui, &mut cx, &view, mini);
         });
         if !mini {
@@ -1429,7 +1622,7 @@ impl eframe::App for MusicApp {
                 .resizable(true)
                 .frame(Frame::new().fill(egui::Color32::from_black_alpha(110)).inner_margin(egui::Margin::symmetric(14, 0)))
                 .show(ui, |ui| {
-                    let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, current: current.clone(), playing };
+                    let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
                     match which {
                         Side::Queue => side::queue(ui, &mut cx, &self.snap),
                         Side::Lyrics => {
@@ -1440,7 +1633,7 @@ impl eframe::App for MusicApp {
                 });
         }
         egui::CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
-            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, current: current.clone(), playing };
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
             let (top, _) = ui.allocate_exact_size(vec2(ui.available_width(), nav::TOP), Sense::hover());
             let mut top_ui = ui.new_child(egui::UiBuilder::new().max_rect(top));
             nav::top(&mut top_ui, &mut cx, &mut self.search, can_back, can_forward, &mut suggest);
@@ -1486,7 +1679,7 @@ impl eframe::App for MusicApp {
         });
 
         if let Some(open) = self.dialog.as_mut() {
-            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, current: current.clone(), playing };
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
             // As miniaturas mostram a capa e o som de agora.
             let cover = self.snap.current().and_then(|t| cx.covers.color(&t.thumbs));
             let now = crate::look::Now { cover, sound: Some((&self.analyzer.bands, &self.analyzer.wave)) };

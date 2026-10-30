@@ -27,15 +27,53 @@ impl Thumbs {
     /// o redimensionamento. As miniaturas de vídeo (`i.ytimg.com`) não
     /// aceitam; delas vem a menor que cobre o pedido.
     pub fn url_for(&self, px: u32) -> Option<String> {
+        self.source_for(px).map(|source| source.url(px))
+    }
+
+    /// De onde vem a imagem de `px` pixels, sem montar o endereço: as capas
+    /// são procuradas no cache a cada quadro, e só a que falta precisa dele.
+    pub fn source_for(&self, px: u32) -> Option<ThumbSource<'_>> {
         let largest = self.0.last()?;
         if let Some(base) = sizable_base(&largest.url) {
-            return Some(format!("{base}=w{px}-h{px}-l90-rj"));
+            return Some(ThumbSource::Sized(base));
         }
         self.0
             .iter()
             .find(|t| t.width >= px)
             .or(self.0.last())
-            .map(|t| t.url.clone())
+            .map(|t| ThumbSource::Fixed(&t.url))
+    }
+
+    /// Fica só com o que `url_for` usa: das capas que aceitam o tamanho no
+    /// endereço, a maior (as outras são o mesmo endereço com outro sufixo).
+    /// Numa fila de 2.000 músicas são milhares de endereços a menos na
+    /// memória e no `estado.json`.
+    pub fn compact(&mut self) {
+        let sized = self.0.last().is_some_and(|t| sizable_base(&t.url).is_some());
+        if sized && self.0.len() > 1 {
+            let largest = self.0.pop();
+            self.0.clear();
+            self.0.extend(largest);
+        }
+        self.0.shrink_to_fit();
+    }
+}
+
+/// O endereço de uma miniatura antes de ser montado (`Thumbs::source_for`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ThumbSource<'a> {
+    /// O endereço aceita o tamanho: a base, sem o `=w…` do fim.
+    Sized(&'a str),
+    /// Uma miniatura de tamanho fixo (`i.ytimg.com`), como veio.
+    Fixed(&'a str),
+}
+
+impl ThumbSource<'_> {
+    pub fn url(self, px: u32) -> String {
+        match self {
+            Self::Sized(base) => format!("{base}=w{px}-h{px}-l90-rj"),
+            Self::Fixed(url) => url.to_owned(),
+        }
     }
 }
 
@@ -267,8 +305,19 @@ impl Privacy {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Lyrics {
     pub text: String,
     pub source: String,
+    /// Com o tempo de cada linha, quando o YouTube Music manda (pelo cliente
+    /// do app Android); vazia na letra só de texto.
+    pub lines: Vec<TimedLine>,
+}
+
+/// Uma linha da letra sincronizada do YouTube Music, em segundos.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimedLine {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
 }

@@ -157,6 +157,8 @@ pub struct Look {
     pub bar: Skin,
     pub mini: Skin,
     pub home: Skin,
+    /// O estilo da letra, o mesmo em todas as telas.
+    pub lyrics: LyricsStyle,
 }
 
 impl Look {
@@ -179,6 +181,268 @@ impl Look {
     }
 }
 
+/// O estilo da letra, igual em todas as telas: fonte, tamanho, cor,
+/// alinhamento, o desfoque e o brilho das linhas que não estão sendo
+/// cantadas, o romaji, e como e por qual serviço vem a tradução.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LyricsStyle {
+    /// A família de fonte instalada da letra; `None`, a Inter do app.
+    pub font_family: Option<String>,
+    /// A da tradução; `None`, a mesma da letra (em peso normal).
+    pub translation_font: Option<String>,
+    /// 0,75 a 1,5 do tamanho de sempre.
+    pub size: f32,
+    pub align: TextAlign,
+    /// A cor da parte já cantada.
+    pub color: [u8; 3],
+    /// O desfoque das outras linhas (0 a 1), mais forte longe da cantada.
+    pub blur: f32,
+    /// O brilho das outras linhas (0,1 a 0,7).
+    pub dim: f32,
+    pub romaji: bool,
+    pub translation: TranslationMode,
+    /// O idioma da tradução ("pt", "en"); `None`, o do app.
+    pub translation_lang: Option<String>,
+    pub translation_color: [u8; 3],
+    pub service: TranslateService,
+    /// O modelo do Ollama na tradução local; `None`, o melhor instalado.
+    pub local_model: Option<String>,
+}
+
+impl Default for LyricsStyle {
+    fn default() -> Self {
+        Self {
+            font_family: None,
+            translation_font: None,
+            size: 1.0,
+            align: TextAlign::Left,
+            color: [255, 255, 255],
+            blur: 0.0,
+            dim: 0.32,
+            romaji: true,
+            translation: TranslationMode::Below,
+            translation_lang: None,
+            translation_color: [170, 200, 255],
+            service: TranslateService::Google,
+            local_model: None,
+        }
+    }
+}
+
+impl LyricsStyle {
+    pub const SIZE: std::ops::RangeInclusive<f32> = 0.75..=1.5;
+    pub const DIM: std::ops::RangeInclusive<f32> = 0.1..=0.7;
+
+    /// O idioma para onde traduzir: o escolhido, ou o do app.
+    pub fn target(&self) -> String {
+        self.translation_lang.clone().unwrap_or_else(|| musicfast_i18n::current().code().to_owned())
+    }
+
+    /// A marca guardada na letra traduzida: idioma e serviço. Mudar um dos
+    /// dois traduz de novo.
+    pub fn translation_key(&self) -> String {
+        translation_key(&self.target(), self.service, self.local_model.as_deref())
+    }
+}
+
+/// A marca de uma tradução: idioma, serviço e, na local, o modelo
+/// escolhido (trocar de modelo traduz de novo).
+pub fn translation_key(target: &str, service: TranslateService, local_model: Option<&str>) -> String {
+    match (service, local_model) {
+        (TranslateService::Local, Some(model)) => format!("{target}:local:{model}"),
+        _ => format!("{target}:{}", service.key()),
+    }
+}
+
+/// Para que lado a letra encosta.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl TextAlign {
+    pub const ALL: [Self; 3] = [Self::Left, Self::Center, Self::Right];
+
+    pub fn label(self) -> &'static str {
+        let t = musicfast_i18n::t();
+        match self {
+            Self::Left => t.align_left,
+            Self::Center => t.align_center,
+            Self::Right => t.align_right,
+        }
+    }
+
+    pub fn egui(self) -> egui::Align {
+        match self {
+            Self::Left => egui::Align::LEFT,
+            Self::Center => egui::Align::Center,
+            Self::Right => egui::Align::RIGHT,
+        }
+    }
+}
+
+/// Os nomes das famílias de fonte da letra e da tradução no egui.
+pub const LYRICS_FAMILY: &str = "letra";
+pub const TRANSLATION_FAMILY: &str = "letra-traducao";
+
+/// As fontes da letra já postas no egui (`ensure_lyrics_fonts`).
+#[derive(Default)]
+pub struct LyricsFonts {
+    /// A família instalada em cada uma (letra, tradução).
+    lyrics: Option<String>,
+    translation: Option<String>,
+    /// As que não deu para ler (desinstaladas): não tenta a cada quadro.
+    missing: std::collections::HashSet<String>,
+}
+
+fn has_family(ctx: &egui::Context, key: &str) -> bool {
+    ctx.fonts(|f| f.definitions().families.contains_key(&egui::FontFamily::Name(key.into())))
+}
+
+/// A fonte da letra no tamanho `size`: a escolhida, se já está carregada,
+/// senão a Inter em negrito.
+pub fn lyrics_font(ctx: &egui::Context, style: &LyricsStyle, size: f32) -> egui::FontId {
+    if style.font_family.is_some() && has_family(ctx, LYRICS_FAMILY) {
+        egui::FontId::new(size, egui::FontFamily::Name(LYRICS_FAMILY.into()))
+    } else {
+        theme::bold(size)
+    }
+}
+
+/// A fonte da tradução: a escolhida para ela, ou a da letra em peso normal,
+/// ou a Inter.
+pub fn translation_font(ctx: &egui::Context, style: &LyricsStyle, size: f32) -> egui::FontId {
+    let wanted = style.translation_font.is_some() || style.font_family.is_some();
+    if wanted && has_family(ctx, TRANSLATION_FAMILY) {
+        egui::FontId::new(size, egui::FontFamily::Name(TRANSLATION_FAMILY.into()))
+    } else {
+        theme::regular(size)
+    }
+}
+
+/// Garante as famílias da letra e da tradução nas fontes do egui: a face
+/// escolhida na frente e as da Inter atrás (para acentos e japonês e afins
+/// que ela não tenha). Barato quando já estão; a troca das fontes do
+/// sistema ao abrir o app apaga as famílias, e elas voltam no quadro
+/// seguinte. Espera a lista das fontes instaladas ficar pronta.
+pub fn ensure_lyrics_fonts(ctx: &egui::Context, style: &LyricsStyle, state: &mut LyricsFonts) {
+    // Roda a cada quadro: sem fonte escolhida (o comum), nada a conferir, e
+    // a conferência não copia os nomes.
+    if style.font_family.is_none() && style.translation_font.is_none() {
+        return;
+    }
+    let translation = style.translation_font.as_deref().or(style.font_family.as_deref());
+    let wanted = [(LYRICS_FAMILY, style.font_family.as_deref(), 700u16), (TRANSLATION_FAMILY, translation, 400)];
+    fn current<'a>(state: &'a LyricsFonts, key: &str) -> Option<&'a str> {
+        if key == LYRICS_FAMILY { state.lyrics.as_deref() } else { state.translation.as_deref() }
+    }
+    let stale = wanted.iter().any(|(key, family, _)| {
+        family.is_some_and(|name| !state.missing.contains(name)) && (current(state, key) != *family || !has_family(ctx, key))
+    });
+    if !stale || crate::fonts::families(ctx).is_none() {
+        return;
+    }
+    let mut defs = ctx.fonts(|f| f.definitions().clone());
+    for (key, family, weight) in wanted {
+        let Some(name) = family.map(str::to_owned) else { continue };
+        let face = crate::fonts::family(&name).and_then(|f| f.best(weight)).cloned();
+        let Some((face, bytes)) = face.and_then(|face| std::fs::read(&face.path).ok().map(|b| (face, b))) else {
+            log::warn!("fonte da letra não carregou: {name}");
+            state.missing.insert(name);
+            continue;
+        };
+        let data_key = format!("{key}:{name}:{weight}");
+        let mut data = egui::FontData::from_owned(bytes);
+        data.index = face.index;
+        defs.font_data.insert(data_key.clone(), Arc::new(data));
+        // Atrás dela, as da Inter no mesmo peso (com as de reserva do sistema).
+        let fallback = if weight >= 600 { theme::bold(10.0).family } else { theme::regular(10.0).family };
+        let mut chain = vec![data_key];
+        chain.extend(defs.families.get(&fallback).cloned().unwrap_or_default());
+        defs.families.insert(egui::FontFamily::Name(key.into()), chain);
+        if key == LYRICS_FAMILY {
+            state.lyrics = Some(name);
+        } else {
+            state.translation = Some(name);
+        }
+    }
+    ctx.set_fonts(defs);
+}
+
+/// Como a tradução aparece.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TranslationMode {
+    /// Embaixo de cada linha, menor.
+    #[default]
+    Below,
+    /// Em cima de cada linha, menor (a original embaixo).
+    Above,
+    /// No lugar da linha original.
+    Replace,
+}
+
+/// O serviço de tradução.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TranslateService {
+    /// O tradutor do Google (o endpoint aberto que a extensão Better Lyrics usa).
+    #[default]
+    Google,
+    /// O MyMemory (api.mymemory.translated.net): aberto, com limite diário.
+    MyMemory,
+    /// No próprio computador: o Ollama ou o LibreTranslate (`local_tr`).
+    Local,
+}
+
+impl TranslateService {
+    pub const ALL: [Self; 3] = [Self::Google, Self::MyMemory, Self::Local];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::MyMemory => "mymemory",
+            Self::Local => "local",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        let t = musicfast_i18n::t();
+        match self {
+            Self::Google => t.method_google,
+            Self::MyMemory => t.method_mymemory,
+            Self::Local => t.method_local,
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        let t = musicfast_i18n::t();
+        match self {
+            Self::Google => t.method_google_hint,
+            Self::MyMemory => t.method_mymemory_hint,
+            Self::Local => t.method_local_hint,
+        }
+    }
+}
+
+/// Os idiomas para onde dá para traduzir, com o nome no próprio idioma.
+pub const TRANSLATION_LANGS: [(&str, &str); 9] = [
+    ("pt", "Português"),
+    ("en", "English"),
+    ("es", "Español"),
+    ("fr", "Français"),
+    ("de", "Deutsch"),
+    ("it", "Italiano"),
+    ("ja", "日本語"),
+    ("ko", "한국어"),
+    ("zh-CN", "中文"),
+];
+
 /// As cores prontas da "Cor fixa".
 pub const PRESETS: [[u8; 3]; 8] = [
     [92, 40, 140],
@@ -195,9 +459,19 @@ pub const PRESETS: [[u8; 3]; 8] = [
 /// ocupar juntos depois de reduzidos.
 const MAX_BYTES: usize = 40 * 1024 * 1024;
 const MAX_FRAMES: usize = 300;
-const FRAMES_BUDGET: usize = 160 * 1024 * 1024;
+/// Por superfície (são quatro). Era 160 MB, e o que passava cortava a
+/// animação no meio; agora os quadros encolhem para caber (`gif_frames`).
+/// Um GIF comum de fundo (498×280, 60 quadros) usa 33 MB e não muda.
+const FRAMES_BUDGET: usize = 64 * 1024 * 1024;
+/// O lado de um GIF antes do orçamento, e o menor a que ele encolhe para
+/// caber; abaixo disso, perde os quadros do fim, como antes.
+const GIF_SIDE: u32 = 720;
+const GIF_MIN_SIDE: u32 = 240;
 /// O lado maior de uma imagem parada: o fundo fica escurecido, não precisa de mais.
 const MAX_SIDE: u32 = 1280;
+/// O desfoque que fica depois de a imagem desfocada encolher (`soften`), em
+/// pixels: com isso a ampliação da placa de vídeo sai lisa, sem degraus.
+const BLUR_SIGMA_KEPT: f32 = 4.0;
 
 type Frames = Vec<(ColorImage, Duration)>;
 
@@ -364,7 +638,7 @@ fn fetch(http: &reqwest::blocking::Client, url: &str, blur: f32) -> Result<Frame
     }
     let format = image::guess_format(&bytes).map_err(|e| e.to_string())?;
     if format == image::ImageFormat::Gif {
-        return gif_frames(&bytes, blur);
+        return gif_frames(&bytes, blur, FRAMES_BUDGET);
     }
     let img = image::load_from_memory_with_format(&bytes, format).map_err(|e| e.to_string())?;
     Ok(vec![(to_color_image(soften(shrink(img, MAX_SIDE), blur)), Duration::ZERO)])
@@ -398,18 +672,30 @@ pub fn adopt(dir: &std::path::Path, surface: Surface, source: &std::path::Path) 
 
 /// O desfoque proporcional ao tamanho: o mesmo `blur` borra igual uma
 /// imagem pequena e uma grande.
+///
+/// A imagem desfocada não tem detalhe fino, então encolhe antes (até sobrar
+/// `BLUR_SIGMA_KEPT` de desfoque) e a placa de vídeo a amplia de volta, lisa:
+/// o desfoque roda em bem menos pixels, e a textura encolhe junto. No
+/// desfoque máximo, uma foto de 1280 px vira 160 px (3,7 MB → 58 kB de
+/// textura); num GIF, isso vale para cada quadro.
 fn soften(img: image::DynamicImage, blur: f32) -> image::DynamicImage {
     if blur <= 0.0 {
         return img;
     }
+    let side = img.width().max(img.height());
+    let sigma = blur * side as f32 / 40.0;
+    let small = (side as f32 / (sigma / BLUR_SIGMA_KEPT).max(1.0)).round().max(64.0) as u32;
+    let img = shrink(img, small);
     let sigma = blur * img.width().max(img.height()) as f32 / 40.0;
     img.fast_blur(sigma)
 }
 
-fn gif_frames(bytes: &[u8], blur: f32) -> Result<Frames, String> {
+fn gif_frames(bytes: &[u8], blur: f32, budget: usize) -> Result<Frames, String> {
     use image::AnimationDecoder;
+    let size = |img: &image::DynamicImage| img.width() as usize * img.height() as usize * 4;
     let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
-    let mut frames = Vec::new();
+    let mut frames: Vec<(image::DynamicImage, Duration)> = Vec::new();
+    let mut side = GIF_SIDE;
     let mut used = 0usize;
     for frame in decoder.into_frames().take(MAX_FRAMES) {
         let frame = frame.map_err(|e| e.to_string())?;
@@ -417,17 +703,28 @@ fn gif_frames(bytes: &[u8], blur: f32) -> Result<Frames, String> {
         // O navegador trata atraso 0 ou 1 como 100 ms; aqui igual.
         let ms = if den == 0 { 100.0 } else { num as f64 / den as f64 };
         let delay = Duration::from_secs_f64(if ms < 20.0 { 0.1 } else { ms / 1000.0 });
-        let img = soften(shrink(image::DynamicImage::ImageRgba8(frame.into_buffer()), 720), blur);
-        used += img.width() as usize * img.height() as usize * 4;
-        if used > FRAMES_BUDGET && !frames.is_empty() {
+        let img = soften(shrink(image::DynamicImage::ImageRgba8(frame.into_buffer()), side), blur);
+        used += size(&img);
+        frames.push((img, delay));
+        // Passou do orçamento: todos os quadros encolhem (os já lidos e os
+        // que vêm), em vez de a animação acabar no meio.
+        while used > budget && side > GIF_MIN_SIDE {
+            side = (side * 4 / 5).max(GIF_MIN_SIDE);
+            frames = frames.into_iter().map(|(img, delay)| (shrink(img, side), delay)).collect();
+            used = frames.iter().map(|(img, _)| size(img)).sum();
+        }
+        if used > budget {
+            // Já no menor lado: a animação para aqui.
+            if frames.len() > 1 {
+                frames.pop();
+            }
             break;
         }
-        frames.push((to_color_image(img), delay));
     }
     if frames.is_empty() {
         return Err("GIF sem quadros".into());
     }
-    Ok(frames)
+    Ok(frames.into_iter().map(|(img, delay)| (to_color_image(img), delay)).collect())
 }
 
 fn shrink(img: image::DynamicImage, side: u32) -> image::DynamicImage {
@@ -439,7 +736,8 @@ fn shrink(img: image::DynamicImage, side: u32) -> image::DynamicImage {
 }
 
 fn to_color_image(img: image::DynamicImage) -> ColorImage {
-    let rgba = img.to_rgba8();
+    // `into_`, não `to_`: o quadro já em RGBA não é copiado mais uma vez.
+    let rgba = img.into_rgba8();
     ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw())
 }
 
@@ -516,7 +814,7 @@ pub fn preview(ui: &egui::Ui, rect: Rect, skin: &Skin, image: &Image, now: &Now,
     let mut shown = Now { cover: now.cover, sound: now.sound };
     if skin.viz.is_some() && shown.sound.is_none_or(|(b, _)| b.iter().all(|v| *v < 0.01)) {
         shown.sound = Some((&demo.0, &demo.1));
-        ui.ctx().request_repaint();
+        ui.ctx().request_repaint_after(crate::viz::FRAME);
     }
     if skin.backdrop == Backdrop::Cover && shown.cover.is_none() {
         shown.cover = Some(Color32::from_rgb(150, 60, 110));
@@ -669,9 +967,40 @@ mod tests {
                 encoder.encode_frame(frame).unwrap();
             }
         }
-        let frames = gif_frames(&bytes, 0.3).unwrap();
+        let frames = gif_frames(&bytes, 0.3, FRAMES_BUDGET).unwrap();
         assert_eq!(frames.len(), 2);
         assert!(frames.iter().all(|(_, d)| (d.as_secs_f64() - 0.25).abs() < 0.02), "{:?}", frames.iter().map(|f| f.1).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_gif_over_the_budget_shrinks_and_keeps_every_frame() {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame, Rgba, RgbaImage};
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new_with_speed(&mut bytes, 30);
+            for i in 0..12u8 {
+                let frame = Frame::from_parts(RgbaImage::from_pixel(400, 400, Rgba([i * 20, 0, 0, 255])), 0, 0, Delay::from_numer_denom_ms(100, 1));
+                encoder.encode_frame(frame).unwrap();
+            }
+        }
+        // 12 quadros de 640 kB (7,7 MB) num orçamento de 5 MB.
+        let budget = 5 << 20;
+        let frames = gif_frames(&bytes, 0.0, budget).unwrap();
+        assert_eq!(frames.len(), 12, "a animação perdeu quadros");
+        let used: usize = frames.iter().map(|(f, _)| f.width() * f.height() * 4).sum();
+        assert!(used <= budget, "{} kB", used >> 10);
+        assert!(frames.iter().all(|(f, _)| f.width() >= GIF_MIN_SIDE as usize));
+    }
+
+    #[test]
+    fn a_blurred_backdrop_is_blurred_small() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1280, 720, image::Rgba([10, 200, 90, 255])));
+        let max = soften(img.clone(), 1.0);
+        assert!(max.width() <= 170 && max.width() >= 64, "{}x{}", max.width(), max.height());
+        // Pouco desfoque não encolhe: a imagem continua nítida onde se vê.
+        let light = soften(img, 0.1);
+        assert_eq!(light.width(), 1280);
     }
 
     #[test]

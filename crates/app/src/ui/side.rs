@@ -162,6 +162,8 @@ pub fn lyrics_body(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, state: Option<&Lyr
         }
         Some(LyricsState::Ready(Some(lyrics))) => {
             let font = if big { theme::semibold(20.0) } else { theme::medium(16.0) };
+            // A letra corrida; "Outra letra" no canto só com indício de outra.
+            let area = ui.available_rect_before_wrap();
             egui::ScrollArea::vertical().id_salt("letra").auto_shrink([false, false]).show(ui, |ui| {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(t().lyrics_not_synced).font(theme::regular(12.5)).color(theme::TEXT_FAINT));
@@ -173,6 +175,9 @@ pub fn lyrics_body(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, state: Option<&Lyr
                 }
                 ui.add_space(16.0);
             });
+            if lyrics.doubtful && ui.rect_contains_pointer(area) {
+                super::lyrics_view::other_button(ui, cx, area, &track.video_id);
+            }
         }
     }
 }
