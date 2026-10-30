@@ -23,8 +23,11 @@ Download it from the [releases page](https://github.com/CakeDev4k/musicfast/rele
   YouTube Premium, o áudio vem em 256 kbps; músicas com restrição de idade
   tocam.
 - Letras sincronizadas do [LRCLIB](https://lrclib.net), com a linha cantada
-  acendendo palavra por palavra (no estilo do Better Lyrics). Clique numa
-  linha para pular até ela.
+  acendendo palavra por palavra (no estilo do Better Lyrics), e do NetEase.
+  Clique numa linha para pular até ela.
+- Estilo da letra (fonte, cor, tamanho, alinhamento, desfoque, romaji) e
+  tradução embaixo, em cima ou no lugar da linha, pelo Google Tradutor, pelo
+  MyMemory ou no próprio computador (Ollama ou LibreTranslate).
 - Mini player sempre no topo (o alfinete sobre a capa, ou `Ctrl+Shift+M`).
 - Em português, inglês e espanhol: segue o idioma do sistema (no Windows, o
   de exibição) ou o escolhido em **Idioma**, no menu da conta.
@@ -35,6 +38,9 @@ Download it from the [releases page](https://github.com/CakeDev4k/musicfast/rele
   em 11 estilos, com cores, quantidade, sensibilidade, opacidade, espessura
   e brilho ajustáveis.
 - Fila, aleatório, repetir, pré-carga da próxima música.
+- Leve no disco: a música toca da memória e nunca é gravada; letras, capas
+  e o cache do login têm teto, se limpam sozinhos e podem ser apagados em
+  **Armazenamento e cache**, no menu da conta.
 - Controles de mídia do sistema (teclas de mídia, o painel do Windows, MPRIS
   no Linux, Now Playing no macOS).
 - Atualização automática pelas releases do GitHub, com o pacote conferido
