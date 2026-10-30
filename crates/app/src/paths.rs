@@ -18,6 +18,8 @@ pub struct Paths {
     pub art: PathBuf,
     /// Os cookies da conta Google, cifrados (`vault`).
     pub session: PathBuf,
+    /// As imagens de fundo escolhidas no computador (`look::adopt`).
+    pub backdrops: PathBuf,
     /// O perfil do WebView2 da janela de login.
     pub webview: PathBuf,
     pub log: PathBuf,
@@ -34,6 +36,7 @@ impl Paths {
             art: root.join("capas"),
             session: root.join("conta.bin"),
             webview: root.join("webview"),
+            backdrops: root.join("fundos"),
             log: root.join("musicfast.log"),
             panic_log: root.join("panicos.log"),
             root,

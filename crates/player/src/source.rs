@@ -68,26 +68,27 @@ pub fn fetch(http: &reqwest::blocking::Client, r: &Resolved) -> Result<Arc<[u8]>
         if let Some(ua) = &r.user_agent {
             req = req.header("User-Agent", ua);
         }
-        let resp = req.send().map_err(|e| FetchError::Other(format!("download: {e}")))?;
+        let t = musicfast_i18n::t();
+        let resp = req.send().map_err(|e| FetchError::Other(t.download_failed(&e.to_string())))?;
         match resp.status().as_u16() {
             200 | 206 => {}
             403 | 410 => return Err(FetchError::Expired),
-            s => return Err(FetchError::Other(format!("o servidor de áudio respondeu {s}"))),
+            s => return Err(FetchError::Other(t.audio_server_answered(s))),
         }
         let before = data.len();
         resp.take(CHUNK + 1)
             .read_to_end(&mut data)
-            .map_err(|e| FetchError::Other(format!("download interrompido: {e}")))?;
+            .map_err(|e| FetchError::Other(t.download_interrupted(&e.to_string())))?;
         let got = (data.len() - before) as u64;
         if data.len() > MAX_BYTES {
-            return Err(FetchError::Other("áudio longo demais".into()));
+            return Err(FetchError::Other(t.audio_too_long.into()));
         }
         if got == 0 || (r.size.is_none() && got < CHUNK) {
             break;
         }
     }
     if data.is_empty() {
-        return Err(FetchError::Other("o servidor de áudio mandou um arquivo vazio".into()));
+        return Err(FetchError::Other(musicfast_i18n::t().audio_empty.into()));
     }
     log::info!("{}: {} kB em {} ms", r.video_id, data.len() / 1024, started.elapsed().as_millis());
     Ok(data.into())
@@ -108,24 +109,25 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn open(bytes: Arc<[u8]>) -> Result<Self, String> {
+        let t = musicfast_i18n::t();
         let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
         hint.with_extension("m4a");
         let format = symphonia::default::get_probe()
             .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
-            .map_err(|e| format!("formato de áudio não reconhecido: {e}"))?;
+            .map_err(|e| t.audio_format_unknown(&e.to_string()))?;
         let track = format
             .default_track(TrackType::Audio)
-            .ok_or("o arquivo não tem faixa de áudio")?;
+            .ok_or(t.audio_no_track)?;
         let track_id = track.id;
         let time_base = track.time_base;
         let params = track
             .codec_params
             .as_ref()
             .and_then(|p| p.audio())
-            .ok_or("faixa sem parâmetros de áudio")?
+            .ok_or(t.audio_no_params)?
             .clone();
-        let rate = params.sample_rate.ok_or("taxa de amostragem desconhecida")?;
+        let rate = params.sample_rate.ok_or(t.audio_no_rate)?;
         let duration = match (track.num_frames, time_base) {
             (Some(frames), Some(tb)) => tb
                 .calc_time(symphonia::core::units::Timestamp::new(frames as i64))
@@ -135,7 +137,7 @@ impl Decoder {
         };
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(&params, &AudioDecoderOptions::default())
-            .map_err(|e| format!("sem decodificador para este áudio: {e}"))?;
+            .map_err(|e| t.audio_no_decoder(&e.to_string()))?;
         Ok(Self {
             format,
             decoder,
@@ -161,7 +163,7 @@ impl Decoder {
                     self.decoder.reset();
                     continue;
                 }
-                Err(_) => return Err("arquivo de áudio corrompido"),
+                Err(_) => return Err(musicfast_i18n::t().audio_corrupted),
             };
             if packet.track_id != self.track_id {
                 continue;
@@ -170,7 +172,7 @@ impl Decoder {
                 Ok(d) => d,
                 // Um pacote ruim vira um silêncio de 23 ms, não o fim da música.
                 Err(SymphoniaError::DecodeError(_)) => continue,
-                Err(_) => return Err("o decodificador de áudio falhou"),
+                Err(_) => return Err(musicfast_i18n::t().audio_decoder_failed),
             };
             self.channels = decoded.spec().channels().count().max(1);
             decoded.copy_to_vec_interleaved(&mut self.packet);

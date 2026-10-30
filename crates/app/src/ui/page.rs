@@ -4,6 +4,7 @@
 //! converte qualquer resposta no mesmo `Page`.
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use musicfast_i18n::t;
 use musicfast_player::Command;
 use musicfast_ytm::{Card, Header, Item, Kind, LikeStatus, Page, Shelf, ShelfStyle, Track};
 
@@ -30,11 +31,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, view: &View, state: &PageState) {
         ui.add_space(80.0);
         ui.vertical_centered(|ui| match &state.error {
             Some(error) => {
-                ui.label(egui::RichText::new("Não deu para carregar").font(theme::semibold(18.0)));
+                ui.label(egui::RichText::new(t().load_failed).font(theme::semibold(18.0)));
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(error).color(theme::TEXT_DIM));
                 ui.add_space(12.0);
-                if kit::pill(ui, Some(icons::REFRESH_CW), "Tentar de novo", false).clicked() {
+                if kit::pill(ui, Some(icons::REFRESH_CW), t().try_again, false).clicked() {
                     cx.act(Action::Reload);
                 }
             }
@@ -52,7 +53,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, view: &View, state: &PageState) {
                 if let View::Search { .. } = view
                     && page.shelves.iter().all(|s| s.items.is_empty())
                 {
-                    ui.label(egui::RichText::new("Nada encontrado.").color(theme::TEXT_DIM));
+                    ui.label(egui::RichText::new(t().nothing_found).color(theme::TEXT_DIM));
                 }
                 if !page.chips.is_empty() {
                     chips(ui, cx, &page, view);
@@ -141,22 +142,22 @@ fn header_block(ui: &mut Ui, cx: &mut Cx, header: &Header, page: &Page) {
                 // As músicas só são copiadas no clique.
                 let has_tracks = page.tracks().next().is_some();
                 if let Some(play) = &header.play {
-                    if kit::pill(ui, Some(icons::PLAY), "Tocar", true).clicked() {
+                    if kit::pill(ui, Some(icons::PLAY), t().play, true).clicked() {
                         cx.act(Action::Cmd(Command::SetShuffle(false)));
                         cx.act(Action::Play(play.clone(), None));
                     }
-                } else if has_tracks && kit::pill(ui, Some(icons::PLAY), "Tocar", true).clicked() {
+                } else if has_tracks && kit::pill(ui, Some(icons::PLAY), t().play, true).clicked() {
                     cx.act(Action::Cmd(Command::SetShuffle(false)));
                     cx.act(Action::Cmd(Command::PlayTracks { tracks: page.tracks().cloned().collect(), index: 0 }));
                 }
-                if has_tracks && !artist && kit::pill(ui, Some(icons::SHUFFLE), "Aleatório", false).clicked() {
+                if has_tracks && !artist && kit::pill(ui, Some(icons::SHUFFLE), t().shuffle, false).clicked() {
                     let tracks: Vec<Track> = page.tracks().cloned().collect();
                     cx.act(Action::Cmd(Command::SetShuffle(true)));
                     let index = (crate::state::unix_now() as usize) % tracks.len();
                     cx.act(Action::Cmd(Command::PlayTracks { tracks, index }));
                 }
                 if let Some(radio) = &header.radio
-                    && kit::pill(ui, Some(icons::RADIO), "Rádio", false).clicked()
+                    && kit::pill(ui, Some(icons::RADIO), t().radio, false).clicked()
                 {
                     cx.act(Action::Cmd(Command::SetShuffle(false)));
                     cx.act(Action::Play(radio.clone(), None));
@@ -168,7 +169,7 @@ fn header_block(ui: &mut Ui, cx: &mut Cx, header: &Header, page: &Page) {
                 // playlist na biblioteca.
                 if let Some(channel) = &header.channel_id {
                     let on = cx.me.subscribed.get(channel).copied().or(header.subscribed).unwrap_or(false);
-                    let (icon, label) = if on { (icons::CHECK, "Inscrito") } else { (icons::PLUS, "Inscrever-se") };
+                    let (icon, label) = if on { (icons::CHECK, t().subscribed) } else { (icons::PLUS, t().subscribe) };
                     if kit::pill(ui, Some(icon), label, false).clicked() {
                         cx.act(Action::Subscribe(channel.clone(), !on));
                     }
@@ -178,9 +179,9 @@ fn header_block(ui: &mut Ui, cx: &mut Cx, header: &Header, page: &Page) {
                 {
                     let on = cx.me.saved.get(&playlist).copied().unwrap_or(false);
                     let (icon, label) = if on {
-                        (icons::BOOKMARK_CHECK, "Na biblioteca")
+                        (icons::BOOKMARK_CHECK, t().in_library)
                     } else {
-                        (icons::BOOKMARK_PLUS, "Salvar na biblioteca")
+                        (icons::BOOKMARK_PLUS, t().save_to_library)
                     };
                     if kit::pill(ui, Some(icon), label, false).clicked() {
                         cx.act(Action::SaveCollection(playlist, !on));
@@ -198,11 +199,14 @@ fn shelf_title(ui: &mut Ui, cx: &mut Cx, shelf: &Shelf, arrows: Option<Id>, play
     if shelf.title.is_empty() {
         return;
     }
-    ui.horizontal(|ui| {
-        ui.set_min_height(41.0);
-        ui.label(egui::RichText::new(&shelf.title).font(theme::bold(34.0)));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
+    // Os botões primeiro, da direita para a esquerda; o título fica com o
+    // que sobra, cortado com reticências, em vez de passar por baixo deles.
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 41.0), Sense::hover());
+    let mut buttons = ui.new_child(UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    {
+        let ui = &mut buttons;
+        ui.spacing_mut().item_spacing.x = 0.0;
+        {
             if let Some(id) = arrows {
                 let [back, forward] = ui.data(|d| d.get_temp::<[bool; 2]>(id.with("pode"))).unwrap_or_default();
                 if arrow(ui, icons::CHEVRON_RIGHT, forward) {
@@ -214,7 +218,7 @@ fn shelf_title(ui: &mut Ui, cx: &mut Cx, shelf: &Shelf, arrows: Option<Id>, play
                 }
                 ui.add_space(24.0);
             }
-            if play_all && outline_pill(ui, "Tocar tudo") {
+            if play_all && outline_pill(ui, t().play_all) {
                 cx.act(Action::Cmd(Command::SetShuffle(false)));
                 cx.act(Action::Cmd(Command::PlayTracks { tracks: shelf_tracks(shelf), index: 0 }));
             }
@@ -222,12 +226,22 @@ fn shelf_title(ui: &mut Ui, cx: &mut Cx, shelf: &Shelf, arrows: Option<Id>, play
                 if play_all {
                     ui.add_space(8.0);
                 }
-                if outline_pill(ui, "Mais") {
+                if outline_pill(ui, t().more) {
                     cx.act(Action::Open(View::browse(&more.id, more.params.as_deref())));
                 }
             }
-        });
-    });
+        }
+    }
+    let used = buttons.min_rect().width();
+    let gap = if used > 0.0 { 24.0 } else { 0.0 };
+    let width = (row.width() - used - gap).max(40.0);
+    let title = kit::one_line(ui, &shelf.title, theme::bold(34.0), theme::TEXT, width);
+    let resp = ui.interact(Rect::from_min_size(row.min, vec2(title.size().x, row.height())), Id::new(("titulo-prateleira", &shelf.title)), Sense::hover());
+    if title.size().x >= width - 1.0 {
+        // Cortado: o nome inteiro na dica.
+        resp.on_hover_text(&shelf.title);
+    }
+    ui.painter().galley(pos2(row.left(), row.center().y - title.size().y / 2.0), title, theme::TEXT);
     ui.add_space(16.0);
 }
 
@@ -591,32 +605,32 @@ pub fn track_menu(ui: &mut Ui, cx: &mut Cx, track: &Track) {
     ui.set_width(MENU_W);
     if cx.me.signed_in {
         let liked = cx.me.like(&track.video_id) == LikeStatus::Like;
-        let label = if liked { "Remover das curtidas" } else { "Curtir" };
+        let label = if liked { t().remove_from_liked } else { t().like };
         if menu_item(ui, icons::THUMBS_UP, label) {
             let status = if liked { LikeStatus::Indifferent } else { LikeStatus::Like };
             cx.act(Action::Rate(track.video_id.clone(), status));
         }
-        if menu_item(ui, icons::LIST_PLUS, "Salvar em uma playlist") {
+        if menu_item(ui, icons::LIST_PLUS, t().save_to_playlist) {
             cx.act(Action::Dialog(super::Dialog::SaveTo { track: track.clone() }));
         }
         ui.separator();
     }
-    if menu_item(ui, icons::LIST_PLUS, "Tocar a seguir") {
+    if menu_item(ui, icons::LIST_PLUS, t().play_next) {
         cx.act(Action::Cmd(Command::PlayNext(track.clone())));
     }
-    if menu_item(ui, icons::LIST_END, "Adicionar à fila") {
+    if menu_item(ui, icons::LIST_END, t().add_to_queue) {
         cx.act(Action::Cmd(Command::Enqueue(track.clone())));
     }
-    if menu_item(ui, icons::RADIO, "Iniciar rádio") {
+    if menu_item(ui, icons::RADIO, t().start_radio) {
         cx.act(Action::Cmd(Command::PlayRadio { seed: track.clone() }));
     }
     if let Some(id) = track.album.as_ref().and_then(|a| a.id.as_ref())
-        && menu_item(ui, icons::DISC_3, "Ir para o álbum")
+        && menu_item(ui, icons::DISC_3, t().go_to_album)
     {
         cx.act(Action::Open(View::browse(id, None)));
     }
     if let Some(id) = track.artists.iter().find_map(|a| a.id.as_ref())
-        && menu_item(ui, icons::USER, "Ir para o artista")
+        && menu_item(ui, icons::USER, t().go_to_artist)
     {
         cx.act(Action::Open(View::browse(id, None)));
     }

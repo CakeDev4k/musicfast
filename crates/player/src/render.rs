@@ -10,7 +10,7 @@
 //! (`Arm`) e entra no mesmo callback em que a atual termina.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 
 use crate::engine::Msg;
@@ -39,6 +39,40 @@ pub enum Event {
     FadedOut,
 }
 
+/// As últimas amostras tocadas (mono, antes do volume), para o visualizador
+/// da interface. O callback escreve sem trava; quem lê pode pegar uma
+/// amostra no meio de uma escrita, o que num desenho não se vê.
+pub struct Scope {
+    samples: Box<[AtomicU32]>,
+    at: AtomicUsize,
+}
+
+impl Scope {
+    pub const LEN: usize = 4096;
+
+    fn push(&self, value: f32) {
+        let i = self.at.load(Ordering::Relaxed);
+        self.samples[i % Self::LEN].store(value.to_bits(), Ordering::Relaxed);
+        self.at.store(i.wrapping_add(1), Ordering::Relaxed);
+    }
+
+    /// Copia as `out.len()` amostras mais novas, da mais velha à mais nova.
+    pub fn read(&self, out: &mut [f32]) {
+        let end = self.at.load(Ordering::Relaxed);
+        let n = out.len().min(Self::LEN);
+        for (k, slot) in out.iter_mut().take(n).enumerate() {
+            let i = end.wrapping_sub(n).wrapping_add(k) % Self::LEN;
+            *slot = f32::from_bits(self.samples[i].load(Ordering::Relaxed));
+        }
+    }
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self { samples: (0..Self::LEN).map(|_| AtomicU32::new(0)).collect(), at: AtomicUsize::new(0) }
+    }
+}
+
 /// O que a interface lê sem perguntar a ninguém.
 #[derive(Default)]
 pub struct Shared {
@@ -47,6 +81,7 @@ pub struct Shared {
     /// O volume pedido, já na curva (amplitude), como bits de `f32`.
     pub gain: AtomicU32,
     pub out_rate: AtomicU32,
+    pub scope: Scope,
 }
 
 struct Playing {
@@ -245,6 +280,7 @@ impl fastframe_audio::Render for Renderer {
         let ch = self.channels;
         for frame in out.chunks_exact_mut(ch) {
             let (l, r) = self.frame();
+            self.shared.scope.push((l + r) * 0.5);
             self.gain += (target - self.gain) * self.k;
             if ch == 1 {
                 frame[0] = (l + r) * 0.5 * self.gain;

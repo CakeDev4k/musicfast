@@ -134,7 +134,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, song: &Song, key: &str, position: f64, big
         let b = ui.interact(r, id.with("sincronizar"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
         let fill = if b.hovered() { Color32::from_gray(225) } else { theme::TEXT };
         painter.rect_filled(r, CornerRadius::same(17), fill);
-        painter.text(r.center(), Align2::CENTER_CENTER, "Sincronizar", theme::medium(14.0), Color32::BLACK);
+        painter.text(r.center(), Align2::CENTER_CENTER, musicfast_i18n::t().sync, theme::medium(14.0), Color32::BLACK);
         if b.clicked() {
             st.manual_until = None;
         }

@@ -20,8 +20,14 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// A mesma entrada que o botão "Fazer login" do site usa.
-const LOGIN_URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&hl=pt-BR&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26hl%3Dpt-BR%26next%3Dhttps%253A%252F%252Fmusic.youtube.com%252F";
+/// A mesma entrada que o botão "Fazer login" do site usa, no idioma do app
+/// (`hl`, "pt-BR").
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn login_url(hl: &str) -> String {
+    format!(
+        "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&hl={hl}&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26hl%3D{hl}%26next%3Dhttps%253A%252F%252Fmusic.youtube.com%252F"
+    )
+}
 
 /// O prefixo da linha que leva os cookies de volta.
 const PREFIX: &str = "musicfast-cookies\t";
@@ -37,6 +43,8 @@ pub fn sign_in(silent: bool) -> Result<Option<String>, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
     cmd.arg("--entrar");
+    // A janela é outro processo: recebe o idioma que o app está usando.
+    cmd.env(musicfast_i18n::ENV, musicfast_i18n::current().code());
     if silent {
         cmd.arg(SILENT);
     }
@@ -44,7 +52,7 @@ pub fn sign_in(silent: bool) -> Result<Option<String>, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("não abri a janela de login: {e}"))?;
+        .map_err(|e| musicfast_i18n::t().login_spawn_failed(&e.to_string()))?;
     let mut out = String::new();
     if let Some(mut stdout) = child.stdout.take() {
         let _ = stdout.read_to_string(&mut out);
@@ -76,20 +84,22 @@ pub fn window(profile: PathBuf, silent: bool) -> ! {
     use tao::window::WindowBuilder;
     use wry::{WebContext, WebViewBuilder};
 
+    // O `MUSICFAST_LANG` que `sign_in` passou manda no idioma.
+    musicfast_i18n::set(musicfast_i18n::system().lang);
     let fail = |what: &str, error: &dyn std::fmt::Display| -> ! {
         eprintln!("{what}: {error}");
         std::process::exit(2)
     };
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
-        .with_title("Entrar com o Google · MusicFast")
+        .with_title(musicfast_i18n::t().login_window_title)
         .with_inner_size(LogicalSize::new(500.0, 720.0))
         .with_window_icon(tao::window::Icon::from_rgba(crate::icon::window_icon().rgba, 64, 64).ok())
         .with_visible(!silent)
         .build(&event_loop)
         .unwrap_or_else(|e| fail("janela", &e));
     let mut context = WebContext::new(Some(profile));
-    let builder = WebViewBuilder::new_with_web_context(&mut context).with_url(if silent { "https://music.youtube.com/" } else { LOGIN_URL });
+    let builder = WebViewBuilder::new_with_web_context(&mut context).with_url(if silent { "https://music.youtube.com/".to_owned() } else { login_url(&musicfast_i18n::system().tag()) });
     // No Linux o WebKitGTK entra na caixa GTK que o tao põe na janela.
     #[cfg(target_os = "linux")]
     let built = {

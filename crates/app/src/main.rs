@@ -12,7 +12,9 @@ mod covers;
 mod icon;
 mod jobs;
 mod login;
+mod look;
 mod lyrics;
+mod viz;
 mod paths;
 mod state;
 mod ui;
@@ -67,6 +69,7 @@ fn main() -> eframe::Result<()> {
     // A janela de login é um processo à parte, aberto pela cópia que roda:
     // não disputa a vaga de instância única nem o log.
     match std::env::args().nth(1).as_deref() {
+        // O idioma vem do app que abriu a janela (`musicfast_i18n::ENV`).
         Some("--entrar") => login::window(Paths::new().webview, std::env::args().nth(2).as_deref() == Some(login::SILENT)),
         Some("--medir") => bench::run(),
         Some("--exportar-icone") => {

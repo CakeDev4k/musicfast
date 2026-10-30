@@ -131,6 +131,17 @@ mod tests {
             ("TRASH_2", TRASH_2),
             ("REFRESH_CW", REFRESH_CW),
             ("INFO", INFO),
+            ("GLOBE", GLOBE),
+            ("PALETTE", PALETTE),
+            ("MOON", MOON),
+            ("PIPETTE", PIPETTE),
+            ("AUDIO_WAVEFORM", AUDIO_WAVEFORM),
+            ("PAINT_BUCKET", PAINT_BUCKET),
+            ("IMAGE", IMAGE),
+            ("LINK", LINK),
+            ("MONITOR_PLAY", MONITOR_PLAY),
+            ("PANEL_BOTTOM", PANEL_BOTTOM),
+            ("PICTURE_IN_PICTURE_2", PICTURE_IN_PICTURE_2),
         ];
         for (name, icon) in all {
             assert!(!icon.is_empty(), "{name} vazio");

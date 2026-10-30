@@ -34,6 +34,10 @@ pub struct Saved {
     pub mini_anchor: Option<[f32; 2]>,
     /// Onde a janela estava da última vez que esteve normal.
     pub window: Option<WindowGeom>,
+    /// O idioma escolhido ("pt", "en", "es"); sem ele, o do sistema.
+    pub language: Option<String>,
+    /// O fundo do player ("Personalizar o player").
+    pub look: crate::look::Look,
 }
 
 /// Posição e tamanho da janela, em pontos.
@@ -84,6 +88,8 @@ impl Default for Saved {
             sidebar_width: crate::ui::nav::SIDEBAR,
             mini_anchor: None,
             window: None,
+            language: None,
+            look: crate::look::Look::default(),
         }
     }
 }

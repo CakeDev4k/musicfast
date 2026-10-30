@@ -1,0 +1,374 @@
+//! Os textos de um idioma. Os com pedaços variáveis são modelos (`{}`,
+//! `{v}`, `{r}`) lidos pelos métodos daqui, para os idiomas poderem mudar a
+//! ordem das palavras.
+
+pub struct Strings {
+    // A coluna da esquerda e a barra de cima.
+    pub home: &'static str,
+    pub explore: &'static str,
+    pub library: &'static str,
+    pub expand_menu: &'static str,
+    pub collapse_menu: &'static str,
+    pub new_playlist: &'static str,
+    pub sign_in_invite: &'static str,
+    pub sign_in: &'static str,
+    pub signing_in: &'static str,
+    pub sign_in_with_cookies: &'static str,
+    pub sign_in_pasting_cookies: &'static str,
+    pub liked_songs: &'static str,
+    pub auto_playlist: &'static str,
+    pub your_library: &'static str,
+    pub sign_out: &'static str,
+    pub manage_google_account: &'static str,
+    pub back_tip: &'static str,
+    pub forward_tip: &'static str,
+    pub search_hint: &'static str,
+    pub language: &'static str,
+    pub(crate) language_auto: &'static str,
+
+    // As abas da biblioteca e os filtros da busca.
+    pub all: &'static str,
+    pub playlists: &'static str,
+    pub songs: &'static str,
+    pub videos: &'static str,
+    pub albums: &'static str,
+    pub artists: &'static str,
+    pub subscriptions: &'static str,
+    pub history: &'static str,
+    pub episodes: &'static str,
+    pub podcasts: &'static str,
+    pub others: &'static str,
+    pub top_result: &'static str,
+
+    // Privacidade da playlist.
+    pub private: &'static str,
+    pub unlisted: &'static str,
+    pub public: &'static str,
+
+    // Os diálogos.
+    pub title_hint: &'static str,
+    pub privacy: &'static str,
+    pub create: &'static str,
+    pub cancel: &'static str,
+    pub close: &'static str,
+    pub save_to_playlist: &'static str,
+    pub no_playlists_yet: &'static str,
+    pub cookie_steps: [&'static str; 4],
+    pub enter: &'static str,
+    pub cookies_without_session: &'static str,
+
+    // As páginas.
+    pub load_failed: &'static str,
+    pub try_again: &'static str,
+    pub nothing_found: &'static str,
+    pub play: &'static str,
+    pub shuffle: &'static str,
+    pub radio: &'static str,
+    pub subscribed: &'static str,
+    pub subscribe: &'static str,
+    pub in_library: &'static str,
+    pub save_to_library: &'static str,
+    pub play_all: &'static str,
+    pub more: &'static str,
+    pub remove_from_liked: &'static str,
+    pub like: &'static str,
+    pub play_next: &'static str,
+    pub add_to_queue: &'static str,
+    pub start_radio: &'static str,
+    pub go_to_album: &'static str,
+    pub go_to_artist: &'static str,
+    pub sign_in_prompt_title: &'static str,
+    pub sign_in_prompt_body: &'static str,
+
+    // A barra do player e o mini player.
+    pub previous: &'static str,
+    pub next: &'static str,
+    pub pause: &'static str,
+    pub play_tip: &'static str,
+    pub pause_tip: &'static str,
+    pub now_playing: &'static str,
+    pub pin_mini: &'static str,
+    pub pin_mini_tip: &'static str,
+    pub liked: &'static str,
+    pub disliked: &'static str,
+    pub show_queue: &'static str,
+    pub close_queue: &'static str,
+    pub show_lyrics: &'static str,
+    pub close_lyrics: &'static str,
+    pub open_player: &'static str,
+    pub close_player: &'static str,
+    pub shuffle_on: &'static str,
+    pub repeat_queue: &'static str,
+    pub repeat_one: &'static str,
+    pub no_repeat: &'static str,
+    pub(crate) volume: &'static str,
+    pub back_to_window: &'static str,
+    pub nothing_playing: &'static str,
+
+    // A tela "Tocando agora", a fila e a letra.
+    pub up_next: &'static str,
+    pub lyrics: &'static str,
+    pub related: &'static str,
+    pub queue: &'static str,
+    pub(crate) queue_one: &'static str,
+    pub(crate) queue_many: &'static str,
+    pub playing_on_this_device: &'static str,
+    pub nothing_related: &'static str,
+    pub queue_empty: &'static str,
+    pub remove_from_queue: &'static str,
+    pub play_to_see_lyrics: &'static str,
+    pub no_lyrics: &'static str,
+    pub lyrics_not_synced: &'static str,
+    pub sync: &'static str,
+    pub instrumental: &'static str,
+    pub lyrics_by_lrclib: &'static str,
+    pub(crate) lrclib_busy: &'static str,
+    pub lyrics_internal_error: &'static str,
+
+    // Os avisos.
+    pub nothing_to_play: &'static str,
+    pub sign_in_in_window: &'static str,
+    pub signed_out: &'static str,
+    pub update_install_failed: &'static str,
+    pub added_to_liked: &'static str,
+    pub thanks_for_feedback: &'static str,
+    pub removed_from_liked: &'static str,
+    pub saved_to_library: &'static str,
+    pub removed_from_library: &'static str,
+    pub subscription_done: &'static str,
+    pub subscription_cancelled: &'static str,
+    pub(crate) saved_in: &'static str,
+    pub(crate) playlist_created: &'static str,
+    pub session_missing: &'static str,
+    pub connected: &'static str,
+    pub load_more_failed: &'static str,
+    pub session_expired: &'static str,
+    pub login_cancelled: &'static str,
+    pub login_window_failed: &'static str,
+    pub(crate) action_failed: &'static str,
+    pub(crate) updated_to: &'static str,
+    pub update_rolled_back: &'static str,
+
+    // A atualização.
+    pub(crate) downloading_percent: &'static str,
+    pub(crate) downloading_version: &'static str,
+    pub restart_to_update: &'static str,
+    pub(crate) version_ready: &'static str,
+    pub new_version: &'static str,
+    pub(crate) version_out: &'static str,
+    pub auto_download_failed: &'static str,
+    pub move_to_applications: &'static str,
+    pub update_with_homebrew: &'static str,
+    pub update_with_package_manager: &'static str,
+    pub not_from_releases: &'static str,
+    pub download_from_releases: &'static str,
+
+    // A personalização do player.
+    pub customize_player: &'static str,
+    pub player_background: &'static str,
+    pub look_section_background: &'static str,
+    pub look_dim: &'static str,
+    pub look_blur: &'static str,
+    pub look_default: &'static str,
+    pub look_cover: &'static str,
+    pub look_color: &'static str,
+    pub look_image: &'static str,
+    pub look_color_label: &'static str,
+    pub image_url_hint: &'static str,
+    pub image_formats: &'static str,
+    pub apply: &'static str,
+    pub loading_image: &'static str,
+    pub(crate) image_load_failed: &'static str,
+    pub look_hint_plain: &'static str,
+    pub look_hint_cover: &'static str,
+    pub look_hint_color: &'static str,
+    pub custom_color: &'static str,
+    pub image_applied: &'static str,
+    pub viz_title: &'static str,
+    pub viz_hint: &'static str,
+    pub viz_off: &'static str,
+    pub viz_bars: &'static str,
+    pub viz_mirror: &'static str,
+    pub viz_line: &'static str,
+    pub viz_circle: &'static str,
+    pub viz_mountain: &'static str,
+    pub viz_led: &'static str,
+    pub viz_dots: &'static str,
+    pub viz_curve: &'static str,
+    pub viz_silk: &'static str,
+    pub viz_pulse: &'static str,
+    pub viz_aurora: &'static str,
+    pub viz_color_cover: &'static str,
+    pub viz_color_rainbow: &'static str,
+    pub viz_color_gradient: &'static str,
+    pub viz_color_solid: &'static str,
+    pub viz_settings: &'static str,
+    pub viz_reset: &'static str,
+    pub viz_colors: &'static str,
+    pub viz_from: &'static str,
+    pub viz_to: &'static str,
+    pub viz_swap: &'static str,
+    pub viz_count: &'static str,
+    pub viz_sensitivity: &'static str,
+    pub viz_opacity: &'static str,
+    pub viz_thickness: &'static str,
+    pub viz_glow: &'static str,
+    pub viz_glow_hint: &'static str,
+    pub surface_player: &'static str,
+    pub surface_bar: &'static str,
+    pub surface_mini: &'static str,
+    pub surface_home: &'static str,
+    pub pick_from_computer: &'static str,
+    pub drop_hint: &'static str,
+    pub or_paste_link: &'static str,
+    pub image_files: &'static str,
+
+    // O login.
+    pub login_window_title: &'static str,
+    pub login_window_crashed: &'static str,
+    pub(crate) login_spawn_failed: &'static str,
+
+    // Os erros do catálogo.
+    pub ytm_internal_error: &'static str,
+    pub(crate) ytm_no_connection: &'static str,
+    pub(crate) ytm_status: &'static str,
+    pub(crate) ytm_unexpected: &'static str,
+    pub(crate) playlist_answered: &'static str,
+
+    // O player.
+    pub building_queue: &'static str,
+    pub downloading: &'static str,
+    pub preparing_ytdlp: &'static str,
+    pub fetching_audio: &'static str,
+    pub finding_similar: &'static str,
+    pub queue_not_built: &'static str,
+    pub(crate) queue_error: &'static str,
+    pub(crate) no_audio_output: &'static str,
+    pub(crate) ytdlp_install_failed: &'static str,
+    pub ytdlp_already_latest: &'static str,
+    pub audio_url_refused: &'static str,
+    pub(crate) audio_server_answered: &'static str,
+    pub(crate) download_failed: &'static str,
+    pub(crate) download_interrupted: &'static str,
+    pub audio_too_long: &'static str,
+    pub audio_empty: &'static str,
+    pub(crate) audio_format_unknown: &'static str,
+    pub audio_no_track: &'static str,
+    pub audio_no_params: &'static str,
+    pub audio_no_rate: &'static str,
+    pub(crate) audio_no_decoder: &'static str,
+    pub audio_corrupted: &'static str,
+    pub audio_decoder_failed: &'static str,
+}
+
+fn fill(template: &str, value: impl std::fmt::Display) -> String {
+    template.replace("{}", &value.to_string())
+}
+
+impl Strings {
+    /// "Automático (Português)".
+    pub fn language_auto(&self, detected: &str) -> String {
+        fill(self.language_auto, detected)
+    }
+
+    pub fn volume(&self, percent: f32) -> String {
+        fill(self.volume, percent.round())
+    }
+
+    pub fn queue_count(&self, n: usize) -> String {
+        fill(if n == 1 { self.queue_one } else { self.queue_many }, n)
+    }
+
+    pub fn lrclib_busy(&self, code: u16) -> String {
+        fill(self.lrclib_busy, code)
+    }
+
+    pub fn saved_in(&self, playlist: &str) -> String {
+        fill(self.saved_in, playlist)
+    }
+
+    pub fn playlist_created(&self, title: &str) -> String {
+        fill(self.playlist_created, title)
+    }
+
+    pub fn action_failed(&self, error: &str) -> String {
+        fill(self.action_failed, error)
+    }
+
+    pub fn updated_to(&self, version: &str) -> String {
+        fill(self.updated_to, version)
+    }
+
+    /// `progress` de 0 a 1.
+    pub fn downloading_percent(&self, progress: f32) -> String {
+        fill(self.downloading_percent, format!("{:.0}", progress * 100.0))
+    }
+
+    pub fn downloading_version(&self, version: &str) -> String {
+        fill(self.downloading_version, version)
+    }
+
+    pub fn version_ready(&self, version: &str) -> String {
+        fill(self.version_ready, version)
+    }
+
+    pub fn version_out(&self, version: &str, reason: &str) -> String {
+        self.version_out.replace("{v}", version).replace("{r}", reason)
+    }
+
+    pub fn image_load_failed(&self, error: &str) -> String {
+        fill(self.image_load_failed, error)
+    }
+
+    pub fn login_spawn_failed(&self, error: &str) -> String {
+        fill(self.login_spawn_failed, error)
+    }
+
+    pub fn ytm_no_connection(&self, error: &str) -> String {
+        fill(self.ytm_no_connection, error)
+    }
+
+    pub fn ytm_status(&self, status: u16) -> String {
+        fill(self.ytm_status, status)
+    }
+
+    pub fn ytm_unexpected(&self, error: &str) -> String {
+        fill(self.ytm_unexpected, error)
+    }
+
+    pub fn playlist_answered(&self, status: &str) -> String {
+        fill(self.playlist_answered, status)
+    }
+
+    pub fn queue_error(&self, error: &str) -> String {
+        fill(self.queue_error, error)
+    }
+
+    pub fn no_audio_output(&self, error: &str) -> String {
+        fill(self.no_audio_output, error)
+    }
+
+    pub fn ytdlp_install_failed(&self, error: &str) -> String {
+        fill(self.ytdlp_install_failed, error)
+    }
+
+    pub fn audio_server_answered(&self, status: impl std::fmt::Display) -> String {
+        fill(self.audio_server_answered, status)
+    }
+
+    pub fn download_failed(&self, error: &str) -> String {
+        fill(self.download_failed, error)
+    }
+
+    pub fn download_interrupted(&self, error: &str) -> String {
+        fill(self.download_interrupted, error)
+    }
+
+    pub fn audio_format_unknown(&self, error: &str) -> String {
+        fill(self.audio_format_unknown, error)
+    }
+
+    pub fn audio_no_decoder(&self, error: &str) -> String {
+        fill(self.audio_no_decoder, error)
+    }
+}

@@ -38,13 +38,14 @@ impl SearchFilter {
     pub const ALL: [Self; 6] = [Self::All, Self::Songs, Self::Videos, Self::Albums, Self::Artists, Self::Playlists];
 
     pub fn label(self) -> &'static str {
+        let t = musicfast_i18n::t();
         match self {
-            Self::All => "Tudo",
-            Self::Songs => "Músicas",
-            Self::Videos => "Vídeos",
-            Self::Albums => "Álbuns",
-            Self::Artists => "Artistas",
-            Self::Playlists => "Playlists",
+            Self::All => t.all,
+            Self::Songs => t.songs,
+            Self::Videos => t.videos,
+            Self::Albums => t.albums,
+            Self::Artists => t.artists,
+            Self::Playlists => t.playlists,
         }
     }
 
@@ -70,10 +71,11 @@ pub enum Error {
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let t = musicfast_i18n::t();
         match self {
-            Self::Http(e) => write!(f, "sem conexão com o YouTube Music ({e})"),
-            Self::Status(s) => write!(f, "o YouTube Music respondeu {s}"),
-            Self::Json(e) => write!(f, "resposta inesperada do YouTube Music ({e})"),
+            Self::Http(e) => f.write_str(&t.ytm_no_connection(e)),
+            Self::Status(s) => f.write_str(&t.ytm_status(*s)),
+            Self::Json(e) => f.write_str(&t.ytm_unexpected(e)),
         }
     }
 }
@@ -124,8 +126,8 @@ pub struct Client {
     version: RwLock<String>,
     visitor: RwLock<Option<String>>,
     auth: RwLock<Option<Auth>>,
-    hl: String,
-    gl: String,
+    /// O idioma e o país dos títulos (`hl`, `gl`): "pt", "BR".
+    locale: RwLock<(String, String)>,
 }
 
 impl Client {
@@ -143,9 +145,17 @@ impl Client {
             version: RwLock::new(DEFAULT_VERSION.to_owned()),
             visitor: RwLock::new(None),
             auth: RwLock::new(None),
-            hl: hl.to_owned(),
-            gl: gl.to_owned(),
+            locale: RwLock::new((hl.to_owned(), gl.to_owned())),
         })
+    }
+
+    /// Troca o idioma e o país dos títulos; vale a partir da próxima chamada.
+    pub fn set_locale(&self, hl: &str, gl: &str) {
+        *self.locale.write().unwrap_or_else(|e| e.into_inner()) = (hl.to_owned(), gl.to_owned());
+    }
+
+    fn locale(&self) -> (String, String) {
+        self.locale.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// O `visitorData` que o YouTube devolve: mandado de volta, ele mantém as
@@ -193,7 +203,7 @@ impl Client {
         let page = self
             .http
             .get("https://music.youtube.com/")
-            .header("Accept-Language", &self.hl)
+            .header("Accept-Language", self.locale().0)
             .send()
             .and_then(|r| r.text())
             .map_err(|e| Error::Http(e.to_string()))?;
@@ -207,8 +217,9 @@ impl Client {
 
     fn post(&self, endpoint: &str, query: &str, mut body: Value) -> Result<Value> {
         let version = self.version.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let (hl, gl) = self.locale();
         body["context"] = json!({
-            "client": { "clientName": "WEB_REMIX", "clientVersion": version, "hl": self.hl, "gl": self.gl }
+            "client": { "clientName": "WEB_REMIX", "clientVersion": version, "hl": hl, "gl": gl }
         });
         let mut req = self
             .http
@@ -360,7 +371,7 @@ impl Client {
         )?;
         match str_at(&v, "status") {
             Some("STATUS_SUCCEEDED") | None => Ok(()),
-            Some(other) => Err(Error::Json(format!("a playlist respondeu {other}"))),
+            Some(other) => Err(Error::Json(musicfast_i18n::t().playlist_answered(other))),
         }
     }
 

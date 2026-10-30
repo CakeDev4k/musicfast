@@ -41,7 +41,7 @@ Copyright (c) 2026 Carmine Paolino. A fonte Inter embutida por
 ### Crates do Rust
 
 As demais dependências (egui, eframe, winit, reqwest, symphonia, wry, tao,
-serde, ring, keyring e outras, listadas no `Cargo.lock`) têm licenças MIT,
+serde, ring, keyring, image, rfd e outras, listadas no `Cargo.lock`) têm licenças MIT,
 Apache-2.0 ou compatíveis; o texto de cada uma acompanha o código-fonte do
 crate.
 

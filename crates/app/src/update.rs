@@ -175,20 +175,21 @@ fn run(updater: &Updater, shared: &Mutex<Shared>, ctx: &egui::Context) -> Option
         }
         Err(error) => {
             log::warn!("atualização: o download de {version} falhou ({error:#})");
-            Some(State::Manual { version, url: release.url.clone(), reason: "o download automático falhou".to_owned() })
+            Some(State::Manual { version, url: release.url.clone(), reason: musicfast_i18n::t().auto_download_failed.to_owned() })
         }
     }
 }
 
 fn manual(release: &Release, reason: &Unsupported) -> State {
+    let t = musicfast_i18n::t();
     let reason = match reason {
-        Unsupported::MoveToApplications => "mova o MusicFast para a pasta Aplicativos".to_owned(),
-        Unsupported::Homebrew => "atualize pelo Homebrew".to_owned(),
+        Unsupported::MoveToApplications => t.move_to_applications.to_owned(),
+        Unsupported::Homebrew => t.update_with_homebrew.to_owned(),
         Unsupported::Flatpak | Unsupported::Snap | Unsupported::SystemPackage(_) | Unsupported::Nix => {
-            "atualize pelo gerenciador de pacotes".to_owned()
+            t.update_with_package_manager.to_owned()
         }
-        Unsupported::Cargo | Unsupported::NotPortable => "esta cópia não veio da página de releases".to_owned(),
-        _ => "baixe a versão nova na página de releases".to_owned(),
+        Unsupported::Cargo | Unsupported::NotPortable => t.not_from_releases.to_owned(),
+        _ => t.download_from_releases.to_owned(),
     };
     State::Manual { version: release.version.clone(), url: release.url.clone(), reason }
 }

@@ -11,7 +11,8 @@ um segundo, usa pouca memória e não carrega o site inteiro num navegador.
 > Termos de Serviço do YouTube; use por sua conta e risco.
 
 *English summary: a fast native YouTube Music desktop client (Windows, Linux,
-macOS) written in Rust/egui. The interface is in Brazilian Portuguese.
+macOS) written in Rust/egui. The interface speaks Portuguese, English and
+Spanish, following the system language.
 Download it from the [releases page](https://github.com/CakeDev4k/musicfast/releases/latest).*
 
 ## Recursos
@@ -25,6 +26,14 @@ Download it from the [releases page](https://github.com/CakeDev4k/musicfast/rele
   acendendo palavra por palavra (no estilo do Better Lyrics). Clique numa
   linha para pular até ela.
 - Mini player sempre no topo (o alfinete sobre a capa, ou `Ctrl+Shift+M`).
+- Em português, inglês e espanhol: segue o idioma do sistema (no Windows, o
+  de exibição) ou o escolhido em **Idioma**, no menu da conta.
+- Personalização (menu ⋮ da barra → **Personalizar o player**) da tela
+  principal, da tela do player, da barra de baixo e do mini player: fundo
+  com a cor da capa, uma cor fixa ou uma imagem/GIF (do computador ou de um
+  link), com escurecer e desfoque, e um visualizador que se mexe com o som,
+  em 11 estilos, com cores, quantidade, sensibilidade, opacidade, espessura
+  e brilho ajustáveis.
 - Fila, aleatório, repetir, pré-carga da próxima música.
 - Controles de mídia do sistema (teclas de mídia, o painel do Windows, MPRIS
   no Linux, Now Playing no macOS).
@@ -105,9 +114,10 @@ Testes: `cargo test --workspace`.
 
 | Crate | O que faz |
 | --- | --- |
+| `crates/i18n` | Os textos em português, inglês e espanhol, e o idioma do sistema. |
 | `crates/ytm` | O catálogo do YouTube Music pela API interna do site (InnerTube). |
 | `crates/player` | Tocar: o yt-dlp resolve o áudio, o Symphonia decodifica o AAC, a fila e o rádio. |
-| `crates/app` | A janela (egui): telas, barra do player, letras, mini player, login, atualização. |
+| `crates/app` | A janela (egui): telas, barra do player, letras, mini player, personalização, login, atualização. |
 | `crates/release-sign` | Gera a chave das atualizações e assina as releases. |
 
 ## Publicar uma versão

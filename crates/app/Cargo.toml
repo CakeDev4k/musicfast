@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 musicfast-ytm = { path = "../ytm" }
 musicfast-player = { path = "../player" }
+musicfast-i18n = { path = "../i18n" }
 egui.workspace = true
 eframe.workspace = true
 log.workspace = true
@@ -28,8 +29,11 @@ fastframe-scroll.workspace = true
 fastframe-update.workspace = true
 # O erro do `Transport` do fastframe-update.
 anyhow = "1"
-# Capas: só JPEG, PNG e WebP, decodificadas fora da thread da interface.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# Capas: só JPEG, PNG e WebP, decodificadas fora da thread da interface; o
+# GIF é o fundo animado do player (`look`).
+# A janela de escolher a imagem de fundo do player no computador.
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 # A janela de login do Google (um processo à parte, `--entrar`): o navegador
 # embutido do sistema (WebView2, WKWebView, WebKitGTK) abre a página de login
 # de verdade e devolve os cookies da conta.

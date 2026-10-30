@@ -20,7 +20,7 @@ Play Pause SkipBack SkipForward Shuffle Repeat Repeat1 Volume2 Volume1 VolumeX S
 House Compass ListMusic MicVocal ArrowLeft Ellipsis X Radio ListPlus ListEnd Disc3 User
 Loader2 ChevronRight ChevronLeft Music2 Trash2 RefreshCw Info
 ThumbsUp ThumbsDown Plus Library LogIn LogOut History ChevronDown ChevronUp Check BookmarkPlus BookmarkCheck Menu
-EllipsisVertical Minimize2 Maximize2 Pin
+EllipsisVertical Minimize2 Maximize2 Pin Globe Palette Moon Pipette AudioWaveform PaintBucket Image Link MonitorPlay PanelBottom PictureInPicture2
 """.split()
 
 CURVE_STEPS = 12

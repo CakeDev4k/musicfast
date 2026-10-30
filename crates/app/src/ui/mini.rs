@@ -7,6 +7,7 @@
 //! botões não saem de baixo do mouse.
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Id, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, ViewportCommand, pos2, vec2};
+use musicfast_i18n::t;
 use musicfast_player::{Command, Snapshot, Status};
 
 use super::side::{self, LyricsState};
@@ -19,7 +20,7 @@ pub const ROW: f32 = 68.0;
 pub const LYRICS: f32 = 170.0;
 const PAD: f32 = 10.0;
 const COVER: f32 = 48.0;
-const FILL: Color32 = Color32::from_rgb(24, 24, 27);
+pub const FILL: Color32 = Color32::from_rgb(24, 24, 27);
 
 pub fn height(lyrics: bool) -> f32 {
     if lyrics { ROW + LYRICS } else { ROW }
@@ -31,11 +32,18 @@ pub struct Out {
     pub toggle_lyrics: bool,
 }
 
-pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, lyrics: Option<Option<&LyricsState>>) -> Out {
+/// `backdrop`: o fundo personalizado ("Personalizar o player"); sem ele, o
+/// cinza de sempre.
+pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, lyrics: Option<Option<&LyricsState>>, backdrop: Option<&dyn Fn(&Ui, Rect)>) -> Out {
     let mut out = Out::default();
     let rect = ui.max_rect();
     let p = ui.painter().clone();
-    p.rect_filled(rect, CornerRadius::ZERO, FILL);
+    match backdrop {
+        Some(paint) => paint(ui, rect),
+        None => {
+            p.rect_filled(rect, CornerRadius::ZERO, FILL);
+        }
+    }
     p.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, Color32::from_white_alpha(20)), StrokeKind::Inside);
 
     // O fundo arrasta a janela; os botões, desenhados depois, pegam o
@@ -72,7 +80,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, lyrics: Op
 
     let (r, b) = button(ui, x, "voltar", 32.0);
     kit::paint_icon_button(ui, r, &b, icons::MAXIMIZE_2, theme::TEXT_DIM);
-    if b.on_hover_text("Voltar à janela inteira").clicked() {
+    if b.on_hover_text(t().back_to_window).clicked() {
         cx.act(Action::Mini(false));
     }
     x -= 24.0;
@@ -82,7 +90,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, lyrics: Op
     let has = track.is_some();
     let (r, b) = button(ui, x, "proxima", 32.0);
     kit::paint_icon_button(ui, r, &b, icons::SKIP_FORWARD, if has { theme::TEXT } else { theme::TEXT_FAINT });
-    if b.on_hover_text("Próxima").clicked() && has {
+    if b.on_hover_text(t().next).clicked() && has {
         cx.act(Action::Cmd(Command::Next));
     }
     x -= 40.0;
@@ -107,14 +115,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, lyrics: Op
         let (icon, nudge) = if playing { (icons::PAUSE, 0.0) } else { (icons::PLAY, 1.5) };
         icons::paint_filled(&p, r.shrink(11.0).translate(vec2(nudge, 0.0)), icon, Color32::BLACK);
     }
-    if b.on_hover_text(if playing { "Pausar" } else { "Tocar" }).clicked() && has {
+    if b.on_hover_text(if playing { t().pause } else { t().play }).clicked() && has {
         cx.act(Action::Cmd(Command::Toggle));
     }
     x -= 40.0;
 
     let (r, b) = button(ui, x, "anterior", 32.0);
     kit::paint_icon_button(ui, r, &b, icons::SKIP_BACK, if has { theme::TEXT } else { theme::TEXT_FAINT });
-    if b.on_hover_text("Anterior").clicked() && has {
+    if b.on_hover_text(t().previous).clicked() && has {
         cx.act(Action::Cmd(Command::Previous));
     }
     x -= 36.0;
@@ -125,7 +133,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, lyrics: Op
         p.circle_filled(r.center(), 16.0, Color32::from_white_alpha(28));
     }
     kit::paint_icon_button(ui, r, &b, icons::MIC_VOCAL, if open { theme::TEXT } else { theme::TEXT_DIM });
-    if b.on_hover_text(if open { "Fechar a letra" } else { "Mostrar a letra" }).clicked() {
+    if b.on_hover_text(if open { t().close_lyrics } else { t().show_lyrics }).clicked() {
         out.toggle_lyrics = true;
     }
     let buttons_left = r.left() - 6.0;
@@ -145,7 +153,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, lyrics: Op
         None => {
             p.rect_filled(cover, CornerRadius::same(6), theme::PLACEHOLDER);
             icons::paint(&p, cover.shrink(14.0), icons::MUSIC_2, theme::TEXT_FAINT);
-            p.text(pos2(cover.right() + 12.0, cy), Align2::LEFT_CENTER, "Nada tocando", theme::medium(14.0), theme::TEXT_DIM);
+            p.text(pos2(cover.right() + 12.0, cy), Align2::LEFT_CENTER, t().nothing_playing, theme::medium(14.0), theme::TEXT_DIM);
         }
     }
 

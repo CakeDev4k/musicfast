@@ -107,15 +107,16 @@ fn segments(runs: &[Value]) -> Vec<&[Value]> {
 
 /// O rótulo de tipo que a busca "Tudo" põe na frente da linha.
 const LABELS: &[&str] = &[
-    "Música", "Song", "Vídeo", "Video", "Episódio", "Episode", "Single", "EP", "Álbum", "Album",
-    "Artista", "Artist", "Playlist", "Podcast", "Perfil", "Profile",
+    "Música", "Song", "Canción", "Vídeo", "Video", "Episódio", "Episode", "Episodio", "Single", "Sencillo",
+    "EP", "Álbum", "Album", "Artista", "Artist", "Playlist", "Podcast", "Perfil", "Profile",
 ];
 
 /// Palavras de contagem ("1,7 bi visualizações", "38 mi ouvintes"): o pedaço
 /// não é um nome de artista.
 const COUNT_WORDS: &[&str] = &[
-    "visualiza", "views", "ouvintes", "listeners", "inscrit", "subscriber", "músicas", "songs",
-    "Tocou", "plays", "reproduç", "faixas", "tracks",
+    "visualiza", "views", "vistas", "visualizaciones", "ouvintes", "listeners", "oyentes", "inscrit",
+    "subscriber", "suscript", "músicas", "songs", "canciones", "Tocou", "plays", "reproduç", "reproducc",
+    "faixas", "tracks", "pistas",
 ];
 
 fn is_joiner(s: &str) -> bool {
@@ -124,7 +125,7 @@ fn is_joiner(s: &str) -> bool {
 
 fn split_names(s: &str) -> Vec<Link> {
     let mut names = vec![s.to_owned()];
-    for sep in [", ", " & ", " e ", " and "] {
+    for sep in [", ", " & ", " e ", " and ", " y "] {
         names = names.iter().flat_map(|n| n.split(sep).map(str::to_owned).collect::<Vec<_>>()).collect();
     }
     names
@@ -377,16 +378,17 @@ struct Groups {
 
 impl Groups {
     fn push(&mut self, item: Item, label: Option<&str>) {
+        let t = musicfast_i18n::t();
         let title = match (&item, label) {
-            (Item::Track(_), Some("Vídeo" | "Video")) => "Vídeos",
-            (Item::Track(_), Some("Episódio" | "Episode")) => "Episódios",
-            (Item::Track(_), _) => "Músicas",
+            (Item::Track(_), Some("Vídeo" | "Video")) => t.videos,
+            (Item::Track(_), Some("Episódio" | "Episode" | "Episodio")) => t.episodes,
+            (Item::Track(_), _) => t.songs,
             (Item::Card(c), _) => match c.kind {
-                Kind::Artist => "Artistas",
-                Kind::Album => "Álbuns",
-                Kind::Playlist => "Playlists",
-                Kind::Podcast => "Podcasts",
-                Kind::Other => "Outros",
+                Kind::Artist => t.artists,
+                Kind::Album => t.albums,
+                Kind::Playlist => t.playlists,
+                Kind::Podcast => t.podcasts,
+                Kind::Other => t.others,
             },
         };
         if !self.order.contains(&title) {
@@ -538,7 +540,7 @@ fn section(name: &str, r: &Value, page: &mut Page, groups: &mut Groups) {
             top.extend(rest);
             let title = text(at(r, "header.musicCardShelfHeaderBasicRenderer.title"));
             page.shelves.push(Shelf {
-                title: if title.is_empty() { "Melhor resultado".into() } else { title },
+                title: if title.is_empty() { musicfast_i18n::t().top_result.into() } else { title },
                 style: ShelfStyle::List,
                 items: top,
                 ..Shelf::default()

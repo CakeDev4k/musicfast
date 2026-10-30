@@ -1,6 +1,7 @@
 //! O painel da direita: a fila (com a atual em destaque) ou a letra.
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Id, Rect, Sense, Ui, pos2, vec2};
+use musicfast_i18n::t;
 use musicfast_player::{Command, Snapshot};
 
 use super::icons;
@@ -22,7 +23,7 @@ fn title(ui: &mut Ui, text: &str) {
 }
 
 pub fn queue(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot) {
-    title(ui, "Fila");
+    title(ui, t().queue);
     queue_list(ui, cx, snap, false);
 }
 
@@ -33,7 +34,7 @@ pub fn queue(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot) {
 pub fn queue_list(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, big: bool) {
     let row_h = if big { 58.0 } else { 56.0 };
     if snap.queue.is_empty() {
-        ui.label(egui::RichText::new("Nada na fila. Toque uma música para começar.").color(theme::TEXT_DIM));
+        ui.label(egui::RichText::new(t().queue_empty).color(theme::TEXT_DIM));
         return;
     }
     let current = snap.index;
@@ -114,7 +115,7 @@ pub fn queue_list(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, big: bool) {
             if hovered && !is_current {
                 let r = ui.interact(remove, Id::new(("tirar", i)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
                 kit::paint_icon_button(ui, remove, &r, icons::X, theme::TEXT_DIM);
-                if r.on_hover_text("Tirar da fila").clicked() {
+                if r.on_hover_text(musicfast_i18n::t().remove_from_queue).clicked() {
                     cx.act(Action::Cmd(Command::Remove(i)));
                     removed = true;
                 }
@@ -136,7 +137,7 @@ pub fn queue_list(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, big: bool) {
 }
 
 pub fn lyrics(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, state: Option<&LyricsState>, position: f64) {
-    title(ui, "Letra");
+    title(ui, t().lyrics);
     lyrics_body(ui, cx, snap, state, position, false);
 }
 
@@ -144,7 +145,7 @@ pub fn lyrics(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, state: Option<&LyricsSt
 /// corrida. `big` é a da tela do player.
 pub fn lyrics_body(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, state: Option<&LyricsState>, position: f64, big: bool) {
     let Some(track) = snap.current() else {
-        ui.label(egui::RichText::new("Toque uma música para ver a letra.").color(theme::TEXT_DIM));
+        ui.label(egui::RichText::new(t().play_to_see_lyrics).color(theme::TEXT_DIM));
         return;
     };
     match state {
@@ -153,7 +154,7 @@ pub fn lyrics_body(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, state: Option<&Lyr
             ui.label(egui::RichText::new(error).color(theme::TEXT_DIM));
         }
         Some(LyricsState::Ready(None)) => {
-            ui.label(egui::RichText::new("Esta música não tem letra no YouTube Music.").color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new(t().no_lyrics).color(theme::TEXT_DIM));
         }
         Some(LyricsState::Ready(Some(lyrics))) if !lyrics.lines.is_empty() => {
             ui.add_space(8.0);
@@ -163,7 +164,7 @@ pub fn lyrics_body(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, state: Option<&Lyr
             let font = if big { theme::semibold(20.0) } else { theme::medium(16.0) };
             egui::ScrollArea::vertical().id_salt("letra").auto_shrink([false, false]).show(ui, |ui| {
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("Esta letra não tem sincronia.").font(theme::regular(12.5)).color(theme::TEXT_FAINT));
+                ui.label(egui::RichText::new(t().lyrics_not_synced).font(theme::regular(12.5)).color(theme::TEXT_FAINT));
                 ui.add_space(10.0);
                 ui.add(egui::Label::new(egui::RichText::new(&lyrics.plain).font(font).color(Color32::from_gray(230))).wrap());
                 if !lyrics.source.is_empty() {

@@ -91,7 +91,7 @@ impl Jobs {
     }
 
     pub fn load(&self, view: View) {
-        let failed = Reply::Page { view: view.clone(), result: Err("erro interno ao ler a resposta do YouTube Music".to_owned()) };
+        let failed = Reply::Page { view: view.clone(), result: Err(musicfast_i18n::t().ytm_internal_error.to_owned()) };
         self.spawn_or("pagina", Some(failed), move |client, _| {
             let result = match &view {
                 View::Home => client.home(),
@@ -105,7 +105,7 @@ impl Jobs {
     }
 
     pub fn more_sections(&self, view: View, token: String) {
-        let failed = Reply::More { view: view.clone(), shelf: None, result: Err("erro interno ao ler a resposta do YouTube Music".to_owned()) };
+        let failed = Reply::More { view: view.clone(), shelf: None, result: Err(musicfast_i18n::t().ytm_internal_error.to_owned()) };
         self.spawn_or("mais", Some(failed), move |client, _| Reply::More {
             view,
             shelf: None,
@@ -114,7 +114,7 @@ impl Jobs {
     }
 
     pub fn more_items(&self, view: View, shelf: usize, token: String) {
-        let failed = Reply::More { view: view.clone(), shelf: Some(shelf), result: Err("erro interno ao ler a resposta do YouTube Music".to_owned()) };
+        let failed = Reply::More { view: view.clone(), shelf: Some(shelf), result: Err(musicfast_i18n::t().ytm_internal_error.to_owned()) };
         self.spawn_or("mais", Some(failed), move |client, _| Reply::More {
             view,
             shelf: Some(shelf),
@@ -130,7 +130,7 @@ impl Jobs {
     }
 
     pub fn track_info(&self, video_id: String) {
-        let failed = Reply::TrackInfo { video_id: video_id.clone(), result: Err("erro interno ao ler a resposta do YouTube Music".to_owned()) };
+        let failed = Reply::TrackInfo { video_id: video_id.clone(), result: Err(musicfast_i18n::t().ytm_internal_error.to_owned()) };
         self.spawn_or("musica", Some(failed), move |client, _| {
             let result = client.watch(Some(&video_id), None, None).map_err(|e| e.to_string());
             Reply::TrackInfo { video_id, result }
@@ -139,7 +139,7 @@ impl Jobs {
 
     /// A letra sincronizada (LRCLIB), ou a do YouTube Music de reserva.
     pub fn lyrics(&self, video_id: String, track: Track, lyrics_id: Option<String>) {
-        let failed = Reply::Lyrics { video_id: video_id.clone(), result: Err("erro interno ao ler a letra".to_owned()) };
+        let failed = Reply::Lyrics { video_id: video_id.clone(), result: Err(musicfast_i18n::t().lyrics_internal_error.to_owned()) };
         self.spawn_or("letra", Some(failed), move |client, http| Reply::Lyrics {
             result: crate::lyrics::fetch(client, http, &track, lyrics_id.as_deref()),
             video_id,
@@ -147,7 +147,7 @@ impl Jobs {
     }
 
     pub fn related(&self, video_id: String, related_id: String) {
-        let failed = Reply::Related { video_id: video_id.clone(), result: Err("erro interno ao ler a resposta do YouTube Music".to_owned()) };
+        let failed = Reply::Related { video_id: video_id.clone(), result: Err(musicfast_i18n::t().ytm_internal_error.to_owned()) };
         self.spawn_or("relacionados", Some(failed), move |client, _| Reply::Related {
             result: client.browse(&related_id, None).map_err(|e| e.to_string()),
             video_id,
@@ -185,7 +185,7 @@ impl Jobs {
 
     /// `silent`: renova a sessão pelo perfil guardado, sem mostrar janela.
     pub fn sign_in(&self, silent: bool) {
-        let failed = Reply::Login { silent, result: Err("a janela de login falhou".into()) };
+        let failed = Reply::Login { silent, result: Err(musicfast_i18n::t().login_window_crashed.into()) };
         self.spawn_or("login", Some(failed), move |_, _| Reply::Login { silent, result: crate::login::sign_in(silent) });
     }
 
@@ -221,7 +221,7 @@ impl Jobs {
         work: impl FnOnce(&Client) -> musicfast_ytm::client::Result<()> + Send + 'static,
     ) {
         let message = message.into();
-        let failed = Reply::Done { message: String::new(), result: Err("erro interno ao ler a resposta do YouTube Music".to_owned()), refresh: Refresh::Nothing };
+        let failed = Reply::Done { message: String::new(), result: Err(musicfast_i18n::t().ytm_internal_error.to_owned()), refresh: Refresh::Nothing };
         self.spawn_or("conta", Some(failed), move |client, _| Reply::Done {
             result: work(client).map_err(|e| e.to_string()),
             message,

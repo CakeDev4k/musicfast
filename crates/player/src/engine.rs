@@ -165,6 +165,12 @@ impl Player {
         self.shared.position_ms.load(Ordering::Relaxed) as f64 / 1000.0
     }
 
+    /// As últimas amostras tocadas (para o visualizador) e a taxa delas.
+    pub fn scope(&self, out: &mut [f32]) -> u32 {
+        self.shared.scope.read(out);
+        self.shared.out_rate.load(Ordering::Relaxed)
+    }
+
     /// Para o player e grava o cache de endereços (no máximo ~1 s).
     pub fn shutdown(&mut self) {
         let _ = self.tx.send(Msg::Quit);
@@ -494,7 +500,7 @@ impl Engine {
                 true
             }
             Err(error) => {
-                self.say(format!("Sem saída de áudio: {error}"));
+                self.say(musicfast_i18n::t().no_audio_output(&error.to_string()));
                 false
             }
         }
@@ -559,7 +565,7 @@ impl Engine {
                         self.queue.clear();
                         self.index = None;
                         self.status = Status::Loading;
-                        self.step = Some("Montando a fila");
+                        self.step = Some(musicfast_i18n::t().building_queue);
                         self.rcmd(RCmd::Stop);
                     }
                 }
@@ -816,11 +822,11 @@ impl Engine {
         let Some(video_id) = self.want.as_ref().map(|w| w.video_id.clone()) else { return };
         let Some(bytes) = self.bytes_for(&video_id) else {
             self.step = Some(if self.resolved.get(&video_id).is_some_and(|r| r.fresh(now())) {
-                "Baixando"
+                musicfast_i18n::t().downloading
             } else if self.ytdlp.is_none() {
-                "Preparando o yt-dlp (só na primeira vez)"
+                musicfast_i18n::t().preparing_ytdlp
             } else {
-                "Buscando o áudio"
+                musicfast_i18n::t().fetching_audio
             });
             self.need(&video_id);
             return;
@@ -914,7 +920,7 @@ impl Engine {
         let _ = std::thread::Builder::new().name("instalar-yt-dlp".into()).spawn(move || {
             let _ = std::fs::create_dir_all(&dir);
             let result = if managed {
-                ytdlp::update(&dir).and_then(|fresh| fresh.ok_or_else(|| "já é a versão mais nova".to_owned()))
+                ytdlp::update(&dir).and_then(|fresh| fresh.ok_or_else(|| musicfast_i18n::t().ytdlp_already_latest.to_owned()))
             } else {
                 ytdlp::install(&dir)
             };
@@ -951,7 +957,7 @@ impl Engine {
                 // Não tentar de novo a cada música: na próxima abertura.
                 self.tried_update = true;
                 if self.ytdlp.is_none() {
-                    self.say(format!("Não foi possível instalar o yt-dlp: {error}"));
+                    self.say(musicfast_i18n::t().ytdlp_install_failed(&error.to_string()));
                     if self.want.is_some() {
                         self.want = None;
                         self.status = Status::Idle;
@@ -1039,7 +1045,7 @@ impl Engine {
                 if relevant && self.retried.insert(video_id.clone()) {
                     self.resolve(&video_id);
                 } else if self.is_wanted(&video_id) {
-                    self.fail_current("o YouTube recusou o endereço do áudio".into());
+                    self.fail_current(musicfast_i18n::t().audio_url_refused.into());
                 }
             }
             Err(FetchError::Other(error)) => {
@@ -1111,7 +1117,7 @@ impl Engine {
                                 // O autoplay ainda não respondeu: segue assim que chegar.
                                 self.resume_on_more = true;
                                 self.status = Status::Loading;
-                                self.step = Some("Buscando músicas parecidas");
+                                self.step = Some(musicfast_i18n::t().finding_similar);
                             } else {
                                 self.status = Status::Paused;
                                 self.restore_at = Some(0.0);
@@ -1158,8 +1164,8 @@ impl Engine {
         }
         let watch = match result {
             Ok(w) if !w.tracks.is_empty() => w,
-            Ok(_) => return self.say("O YouTube Music não montou a fila.".into()),
-            Err(e) => return self.say(format!("Fila: {e}")),
+            Ok(_) => return self.say(musicfast_i18n::t().queue_not_built.into()),
+            Err(e) => return self.say(musicfast_i18n::t().queue_error(&e.to_string())),
         };
         self.radio = watch.continuation;
         let current = self.index.and_then(|i| self.queue.get(i)).cloned();

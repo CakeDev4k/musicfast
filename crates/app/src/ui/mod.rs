@@ -18,6 +18,7 @@ pub mod theme;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use musicfast_i18n::{Lang, t};
 use musicfast_player::Command;
 use musicfast_ytm::{Account, Card, LikeStatus, Page, Play, SearchFilter, Track};
 
@@ -40,12 +41,12 @@ impl LibraryTab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Playlists => "Playlists",
-            Self::Songs => "Músicas",
-            Self::Albums => "Álbuns",
-            Self::Artists => "Artistas",
-            Self::Subscriptions => "Inscrições",
-            Self::History => "Histórico",
+            Self::Playlists => t().playlists,
+            Self::Songs => t().songs,
+            Self::Albums => t().albums,
+            Self::Artists => t().artists,
+            Self::Subscriptions => t().subscriptions,
+            Self::History => t().history,
         }
     }
 
@@ -172,6 +173,14 @@ pub enum Action {
     SubmitCookies(String),
     /// Fechar e deixar o ajudante instalar a versão nova já baixada.
     RestartToUpdate,
+    /// Trocar o idioma (`None`: o do sistema).
+    SetLanguage(Option<Lang>),
+    /// Abrir "Personalizar o player" (com o player aberto atrás).
+    Personalize,
+    /// Escolher no computador a imagem de fundo de uma superfície.
+    PickBackdropFile(crate::look::Surface),
+    /// O fundo do player escolhido.
+    SetLook(crate::look::Look),
 }
 
 /// O que as telas recebem para desenhar.
@@ -179,6 +188,8 @@ pub struct Cx<'a> {
     pub covers: &'a mut Covers,
     pub actions: &'a mut Vec<Action>,
     pub me: &'a Me,
+    /// O idioma escolhido; `None` segue o do sistema.
+    pub language: Option<Lang>,
     /// O `video_id` da música atual, e se está tocando.
     pub current: Option<String>,
     pub playing: bool,

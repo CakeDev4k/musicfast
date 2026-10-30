@@ -4,6 +4,7 @@
 //! player à direita. A linha do tempo é a borda de cima da barra inteira.
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
+use musicfast_i18n::t;
 use musicfast_player::{Command, Repeat, Snapshot, Status};
 use musicfast_ytm::LikeStatus;
 
@@ -126,7 +127,7 @@ fn controls(ui: &mut Ui, cx: &mut Cx, rect: Rect, snap: &Snapshot, position: f64
 
     let (r, resp) = hit(ui, pos2(x0 + 20.0, cy), 40.0, ("ctrl", "anterior"));
     round_button(ui, r, &resp, icons::SKIP_BACK, color, true, 22.0);
-    if resp.on_hover_text("Anterior").clicked() {
+    if resp.on_hover_text(t().previous).clicked() {
         cx.act(Action::Cmd(Command::Previous));
     }
 
@@ -151,14 +152,14 @@ fn controls(ui: &mut Ui, cx: &mut Cx, rect: Rect, snap: &Snapshot, position: f64
         Status::Playing => icons::paint_filled(ui.painter(), Rect::from_center_size(r.center(), vec2(34.0, 34.0)), icons::PAUSE, color),
         _ => icons::paint_filled(ui.painter(), Rect::from_center_size(r.center() + vec2(2.0, 0.0), vec2(36.0, 36.0)), icons::PLAY, color),
     }
-    let tip = if snap.status == Status::Playing { "Pausar (espaço)" } else { "Tocar (espaço)" };
+    let tip = if snap.status == Status::Playing { t().pause_tip } else { t().play_tip };
     if resp.on_hover_text(tip).clicked() {
         cx.act(Action::Cmd(Command::Toggle));
     }
 
     let (r, resp) = hit(ui, pos2(x0 + 128.0, cy), 40.0, ("ctrl", "proxima"));
     round_button(ui, r, &resp, icons::SKIP_FORWARD, color, true, 22.0);
-    if resp.on_hover_text("Próxima").clicked() {
+    if resp.on_hover_text(t().next).clicked() {
         cx.act(Action::Cmd(Command::Next));
     }
 
@@ -196,7 +197,7 @@ fn now_playing(ui: &mut Ui, cx: &mut Cx, rect: Rect, snap: &Snapshot, side: Opti
     let art = Rect::from_min_size(pos2(x0, cy - ART / 2.0), vec2(ART, ART));
     cx.covers.paint(ui, art, &track.thumbs, 2);
     let art_click = ui.interact(art, Id::new("barra-capa"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-    if art_click.on_hover_text("Tocando agora").clicked() {
+    if art_click.on_hover_text(t().now_playing).clicked() {
         cx.act(Action::Expand(!expanded));
     }
 
@@ -211,7 +212,7 @@ fn now_playing(ui: &mut Ui, cx: &mut Cx, rect: Rect, snap: &Snapshot, side: Opti
         ui.painter().circle_filled(r.center(), 10.0, fill);
         ui.painter().circle_stroke(r.center(), 10.0, Stroke::new(1.0, Color32::from_white_alpha(40)));
         icons::paint(ui.painter(), r.shrink(4.5), icons::PIN, theme::TEXT);
-        if resp.on_hover_text("Fixar no mini player (Ctrl+Shift+M)").clicked() {
+        if resp.on_hover_text(t().pin_mini_tip).clicked() {
             cx.act(Action::Mini(true));
         }
     }
@@ -234,8 +235,8 @@ fn now_playing(ui: &mut Ui, cx: &mut Cx, rect: Rect, snap: &Snapshot, side: Opti
     let mut bx = tx + text_w + 16.0 + 20.0;
     if cx.me.signed_in {
         let status = cx.me.like(&track.video_id);
-        for (icon, mine, tip) in [(icons::THUMBS_UP, LikeStatus::Like, "Gostei"), (icons::THUMBS_DOWN, LikeStatus::Dislike, "Não gostei")] {
-            let (r, resp) = hit(ui, pos2(bx, cy), 40.0, ("gostei", tip));
+        for (icon, mine, tip) in [(icons::THUMBS_UP, LikeStatus::Like, t().liked), (icons::THUMBS_DOWN, LikeStatus::Dislike, t().disliked)] {
+            let (r, resp) = hit(ui, pos2(bx, cy), 40.0, ("gostei", mine == LikeStatus::Like));
             let on = status == mine;
             round_button(ui, r, &resp, icon, theme::TEXT, on, 22.0);
             if resp.on_hover_text(tip).clicked() {
@@ -253,14 +254,20 @@ fn now_playing(ui: &mut Ui, cx: &mut Cx, rect: Rect, snap: &Snapshot, side: Opti
     egui::Popup::menu(&resp).align(egui::RectAlign::TOP_START).width(super::page::MENU_W).show(|ui| {
         track_menu(ui, cx, &track);
         ui.separator();
-        for (icon, label, which) in [(icons::LIST_MUSIC, "Fila", Side::Queue), (icons::MIC_VOCAL, "Letra", Side::Lyrics)] {
-            let label = if side == Some(which) { format!("Fechar {}", label.to_lowercase()) } else { format!("Mostrar {}", label.to_lowercase()) };
-            if menu_row(ui, icon, &label) {
+        for (icon, show, close, which) in [
+            (icons::LIST_MUSIC, t().show_queue, t().close_queue, Side::Queue),
+            (icons::MIC_VOCAL, t().show_lyrics, t().close_lyrics, Side::Lyrics),
+        ] {
+            let label = if side == Some(which) { close } else { show };
+            if menu_row(ui, icon, label) {
                 cx.act(Action::ToggleSide(which));
             }
         }
-        if menu_row(ui, icons::PIN, "Fixar no mini player") {
+        if menu_row(ui, icons::PIN, t().pin_mini) {
             cx.act(Action::Mini(true));
+        }
+        if menu_row(ui, icons::PALETTE, t().customize_player) {
+            cx.act(Action::Personalize);
         }
     });
 }
@@ -300,7 +307,7 @@ fn extras(ui: &mut Ui, cx: &mut Cx, rect: Rect, snap: &Snapshot, expanded: bool,
         vec![c + vec2(-9.0, 4.5), c + vec2(9.0, 4.5), c + vec2(0.0, -5.5)]
     };
     ui.painter().add(Shape::convex_polygon(tri, color, Stroke::NONE));
-    if resp.on_hover_text(if expanded { "Fechar o player" } else { "Abrir o player" }).clicked() && has {
+    if resp.on_hover_text(if expanded { t().close_player } else { t().open_player }).clicked() && has {
         cx.act(Action::Expand(!expanded));
     }
     x -= 48.0;
@@ -310,16 +317,16 @@ fn extras(ui: &mut Ui, cx: &mut Cx, rect: Rect, snap: &Snapshot, expanded: bool,
     if snap.shuffle {
         ui.painter().circle_filled(r.center() + vec2(0.0, 15.0), 2.0, theme::TEXT);
     }
-    if resp.on_hover_text(if snap.shuffle { "Aleatório ligado" } else { "Aleatório" }).clicked() {
+    if resp.on_hover_text(if snap.shuffle { t().shuffle_on } else { t().shuffle }).clicked() {
         cx.act(Action::Cmd(Command::SetShuffle(!snap.shuffle)));
     }
     x -= 44.0;
 
     let (r, resp) = hit(ui, pos2(x, cy), 40.0, ("ctrl", "repetir"));
     let (icon, on, next, tip) = match snap.repeat {
-        Repeat::Off => (icons::REPEAT, false, Repeat::All, "Repetir a fila"),
-        Repeat::All => (icons::REPEAT, true, Repeat::One, "Repetir esta música"),
-        Repeat::One => (icons::REPEAT_1, true, Repeat::Off, "Não repetir"),
+        Repeat::Off => (icons::REPEAT, false, Repeat::All, t().repeat_queue),
+        Repeat::All => (icons::REPEAT, true, Repeat::One, t().repeat_one),
+        Repeat::One => (icons::REPEAT_1, true, Repeat::Off, t().no_repeat),
     };
     round_button(ui, r, &resp, icon, if on { theme::TEXT } else { theme::TEXT_DIM }, false, 22.0);
     if on {
@@ -371,7 +378,7 @@ fn volume(ui: &mut Ui, cx: &mut Cx, icon_at: Pos2, snap: &Snapshot, state: &mut 
         icons::VOLUME_2
     };
     round_button(ui, r, &mute, icon, theme::TEXT_DIM, false, 22.0);
-    if mute.on_hover_text(format!("Volume {}%", (volume * 100.0).round())).clicked() {
+    if mute.on_hover_text(t().volume(volume * 100.0)).clicked() {
         if volume > 0.001 {
             state.unmuted = volume;
             cx.act(Action::Cmd(Command::SetVolume(0.0)));

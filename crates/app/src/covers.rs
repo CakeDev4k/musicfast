@@ -31,6 +31,8 @@ const BUCKETS: [u32; 5] = [60, 120, 226, 360, 544];
 struct Entry {
     /// Vazia enquanto baixa, ou depois de falhar.
     texture: Option<TextureHandle>,
+    /// A cor da capa (média puxada para as cores vivas), para o fundo do player.
+    color: Option<Color32>,
     used: u64,
     /// Quando pedir de novo a capa que falhou.
     retry_at: Option<Instant>,
@@ -52,7 +54,7 @@ struct Queue {
 pub struct Covers {
     entries: HashMap<String, Entry>,
     queue: Arc<Queue>,
-    rx: Receiver<(String, Option<ColorImage>)>,
+    rx: Receiver<(String, Option<(ColorImage, Color32)>)>,
     frame: u64,
 }
 
@@ -75,7 +77,10 @@ impl Covers {
         while let Ok((key, image)) = self.rx.try_recv() {
             let Some(entry) = self.entries.get_mut(&key) else { continue };
             match image {
-                Some(image) => entry.texture = Some(ctx.load_texture(&key, image, TextureOptions::LINEAR)),
+                Some((image, color)) => {
+                    entry.texture = Some(ctx.load_texture(&key, image, TextureOptions::LINEAR));
+                    entry.color = Some(color);
+                }
                 None => entry.retry_at = Some(Instant::now() + RETRY),
             }
         }
@@ -91,7 +96,7 @@ impl Covers {
     /// Uma capa já pronta, sem rede (o `--medir`).
     pub fn preload(&mut self, ctx: &egui::Context, url: String, image: ColorImage) {
         let texture = ctx.load_texture(&url, image, TextureOptions::LINEAR);
-        self.entries.insert(url, Entry { texture: Some(texture), used: self.frame, retry_at: None });
+        self.entries.insert(url, Entry { texture: Some(texture), color: None, used: self.frame, retry_at: None });
     }
 
     /// Desenha a capa em `rect` (ou o lugar dela, enquanto baixa).
@@ -114,6 +119,15 @@ impl Covers {
                 icons::paint(ui.painter(), icon, icons::MUSIC_2, Color32::from_gray(90));
             }
         }
+    }
+
+    /// A cor da capa (pedindo a menor, se ainda não veio).
+    pub fn color(&mut self, thumbs: &Thumbs) -> Option<Color32> {
+        let px = BUCKETS[0];
+        let url = thumbs.url_for(px)?;
+        let key = if url.contains("=w") { url.clone() } else { format!("{url}#{px}") };
+        let _loaded = self.texture(url, px)?;
+        self.entries.get(&key).and_then(|e| e.color)
     }
 
     fn texture(&mut self, url: String, px: u32) -> Option<TextureHandle> {
@@ -140,12 +154,12 @@ impl Covers {
         pending.push(Request { key: key.clone(), url, px });
         drop(pending);
         self.queue.ready.notify_one();
-        self.entries.insert(key, Entry { texture: None, used: frame, retry_at: None });
+        self.entries.insert(key, Entry { texture: None, color: None, used: frame, retry_at: None });
         None
     }
 }
 
-fn worker(queue: &Queue, tx: &Sender<(String, Option<ColorImage>)>, http: &reqwest::blocking::Client, ctx: &egui::Context) {
+fn worker(queue: &Queue, tx: &Sender<(String, Option<(ColorImage, Color32)>)>, http: &reqwest::blocking::Client, ctx: &egui::Context) {
     loop {
         let request = {
             let mut pending = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -176,7 +190,7 @@ fn worker(queue: &Queue, tx: &Sender<(String, Option<ColorImage>)>, http: &reqwe
     }
 }
 
-fn fetch(http: &reqwest::blocking::Client, request: &Request) -> Result<ColorImage, String> {
+fn fetch(http: &reqwest::blocking::Client, request: &Request) -> Result<(ColorImage, Color32), String> {
     let bytes = http
         .get(&request.url)
         .send()
@@ -185,7 +199,29 @@ fn fetch(http: &reqwest::blocking::Client, request: &Request) -> Result<ColorIma
         .map_err(|e| e.to_string())?;
     let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
     let rgba = fit_square(img, request.px).to_rgba8();
-    Ok(ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()))
+    let color = vivid_average(rgba.as_raw());
+    Ok((ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()), color))
+}
+
+/// A média das cores com peso para as saturadas: a média pura de uma capa
+/// colorida sobre fundo cinza dava um cinza lamacento.
+pub fn vivid_average(rgba: &[u8]) -> Color32 {
+    let (mut r, mut g, mut b, mut total) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for px in rgba.chunks_exact(4).step_by(3) {
+        let (pr, pg, pb) = (px[0] as f32, px[1] as f32, px[2] as f32);
+        let max = pr.max(pg).max(pb);
+        let min = pr.min(pg).min(pb);
+        // Saturação vezes um pouco de brilho: o preto e o branco quase não contam.
+        let weight = 0.05 + (max - min) / 255.0 * (max / 255.0) * 4.0;
+        r += pr * weight;
+        g += pg * weight;
+        b += pb * weight;
+        total += weight;
+    }
+    if total <= 0.0 {
+        return Color32::from_gray(40);
+    }
+    Color32::from_rgb((r / total) as u8, (g / total) as u8, (b / total) as u8)
 }
 
 /// Todo lugar de capa é quadrado: corta o centro e reduz para `px`.
@@ -217,6 +253,17 @@ fn fit_square(img: image::DynamicImage, px: u32) -> image::DynamicImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_red_cover_on_grey_comes_out_red() {
+        // Três quartos cinza, um quarto vermelho vivo.
+        let mut rgba = Vec::new();
+        for i in 0..400 {
+            rgba.extend_from_slice(if i % 4 == 0 { &[220, 20, 30, 255] } else { &[90, 90, 90, 255] });
+        }
+        let c = vivid_average(&rgba);
+        assert!(c.r() > c.g() + 60 && c.r() > c.b() + 60, "{c:?}");
+    }
 
     fn solid(w: u32, h: u32) -> image::DynamicImage {
         image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(w, h, image::Rgba([200, 10, 10, 255])))

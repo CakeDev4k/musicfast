@@ -1,7 +1,8 @@
 //! "Tocando agora": a tela que a barra abre, como a do site. A capa grande à
 //! esquerda e, à direita, as abas A seguir, Letra e Relacionados.
 
-use egui::{Align2, CornerRadius, CursorIcon, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use egui::{CornerRadius, CursorIcon, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use musicfast_i18n::t;
 use musicfast_player::Snapshot;
 
 use super::side::{self, LyricsState};
@@ -21,9 +22,9 @@ impl Tab {
 
     fn label(self) -> &'static str {
         match self {
-            Self::UpNext => "A seguir",
-            Self::Lyrics => "Letra",
-            Self::Related => "Relacionados",
+            Self::UpNext => t().up_next,
+            Self::Lyrics => t().lyrics,
+            Self::Related => t().related,
         }
     }
 }
@@ -73,7 +74,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, tab: &mut 
         let resp = ui.interact(r, Id::new(("aba-player", i)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
         let selected = *tab == t;
         let color = if selected || resp.hovered() { theme::TEXT } else { theme::TEXT_FAINT };
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, t.label().to_uppercase(), theme::semibold(14.0), color);
+        // Cortada se não couber: em espanhol "A CONTINUACIÓN" encosta na vizinha.
+        let label = super::kit::one_line(ui, &t.label().to_uppercase(), theme::semibold(14.0), color, w - 16.0);
+        ui.painter().galley(r.center() - label.size() / 2.0, label, color);
         if selected {
             let line = Rect::from_min_max(pos2(r.left(), r.bottom() - 2.0), r.max);
             ui.painter().rect_filled(line, CornerRadius::ZERO, theme::TEXT);
@@ -90,8 +93,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, tab: &mut 
             // quantas músicas ela tem.
             ui.add_space(10.0);
             let n = snap.queue.len();
-            let count = format!("{n} {}", if n == 1 { "música na fila" } else { "músicas na fila" });
-            ui.label(egui::RichText::new("Tocando neste dispositivo").font(theme::regular(12.5)).color(theme::TEXT_DIM));
+            let count = t().queue_count(n);
+            ui.label(egui::RichText::new(t().playing_on_this_device).font(theme::regular(12.5)).color(theme::TEXT_DIM));
             ui.label(egui::RichText::new(count).font(theme::semibold(14.0)));
             ui.add_space(12.0);
             side::queue_list(ui, cx, snap, true)
@@ -101,7 +104,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, position: f64, tab: &mut 
             Some(state) => page::show(ui, cx, &View::browse("relacionados", None), state),
             None => {
                 ui.add_space(20.0);
-                ui.label(egui::RichText::new("Nada relacionado a esta música.").color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new(t().nothing_related).color(theme::TEXT_DIM));
             }
         },
     }

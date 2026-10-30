@@ -126,7 +126,7 @@ fn get(http: &reqwest::blocking::Client, path: &str, params: &[(&str, String)]) 
         match response.status().as_u16() {
             404 => return Ok(None),
             200 => return response.json::<Value>().map(Some).map_err(|e| format!("LRCLIB: {e}")),
-            code @ (429 | 500..=599) => last = format!("LRCLIB ocupado (HTTP {code})"),
+            code @ (429 | 500..=599) => last = musicfast_i18n::t().lrclib_busy(code),
             code => return Err(format!("LRCLIB: HTTP {code}")),
         }
     }
@@ -135,14 +135,15 @@ fn get(http: &reqwest::blocking::Client, path: &str, params: &[(&str, String)]) 
 
 fn song_from(v: &Value, duration: Option<f64>) -> Option<Song> {
     if v["instrumental"].as_bool() == Some(true) {
-        return Some(Song { lines: Vec::new(), plain: "♪ Música instrumental".to_owned(), source: "Letra: LRCLIB".to_owned() });
+        let t = musicfast_i18n::t();
+        return Some(Song { lines: Vec::new(), plain: t.instrumental.to_owned(), source: t.lyrics_by_lrclib.to_owned() });
     }
     let lines = v["syncedLyrics"].as_str().map(|s| parse_lrc(s, duration.or(v["duration"].as_f64()))).unwrap_or_default();
     let plain = v["plainLyrics"].as_str().unwrap_or_default().to_owned();
     if lines.is_empty() && plain.trim().is_empty() {
         return None;
     }
-    Some(Song { lines, plain, source: "Letra: LRCLIB".to_owned() })
+    Some(Song { lines, plain, source: musicfast_i18n::t().lyrics_by_lrclib.to_owned() })
 }
 
 /// Tira o que o YouTube põe no título e o LRCLIB não tem: "(Official

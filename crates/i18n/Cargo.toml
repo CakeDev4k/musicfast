@@ -1,0 +1,11 @@
+[package]
+name = "musicfast-i18n"
+description = "Os textos da interface em português, inglês e espanhol, e o idioma do sistema (o de exibição do Windows, o LANG no Linux, o AppleLanguages no macOS)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# O idioma de exibição e o país escolhidos nas Configurações do Windows.
+windows-sys = { version = "0.60", features = ["Win32_Globalization"] }

@@ -2,6 +2,7 @@
 //! (voltar, avançar, a busca com sugestões e os filtros dela).
 
 use egui::{Align2, CornerRadius, CursorIcon, Frame, Id, Key, Rect, Sense, Ui, pos2, vec2};
+use musicfast_i18n::{Lang, t};
 use musicfast_ytm::SearchFilter;
 
 use super::icons;
@@ -39,7 +40,7 @@ fn menu_button(ui: &mut Ui, cx: &mut Cx, mini: bool) {
     let (r, response) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
     kit::paint_icon_button(ui, r, &response, icons::MENU, theme::TEXT);
-    if response.on_hover_text(if mini { "Expandir o menu" } else { "Recolher o menu" }).clicked() {
+    if response.on_hover_text(if mini { t().expand_menu } else { t().collapse_menu }).clicked() {
         cx.act(Action::ToggleSidebar);
     }
 }
@@ -59,9 +60,9 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
     });
     ui.add_space(if mini { 12.0 } else { 16.0 });
     let entries: [(icons::Icon, &str, View); 3] = [
-        (icons::HOUSE, "Início", View::Home),
-        (icons::COMPASS, "Explorar", View::Explore),
-        (icons::LIBRARY, "Biblioteca", View::Library(LibraryTab::Playlists)),
+        (icons::HOUSE, t().home, View::Home),
+        (icons::COMPASS, t().explore, View::Explore),
+        (icons::LIBRARY, t().library, View::Library(LibraryTab::Playlists)),
     ];
     for (icon, label, target) in entries {
         let selected = match (&target, view) {
@@ -102,7 +103,7 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
                 let fill = if response.hovered() { theme::GLASS_HOVER } else { theme::GLASS };
                 ui.painter().circle_filled(r.center(), 20.0, fill);
                 icons::paint(ui.painter(), r.shrink(10.0), icons::PLUS, theme::TEXT);
-                if response.on_hover_text("Nova playlist").clicked() {
+                if response.on_hover_text(t().new_playlist).clicked() {
                     cx.act(Action::Dialog(super::Dialog::NewPlaylist {
                         title: String::new(),
                         privacy: musicfast_ytm::Privacy::Private,
@@ -126,14 +127,14 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
                 ui.set_max_width(ui.available_width() - 20.0);
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new("Faça login para criar e compartilhar playlists, receber recomendações personalizadas e muito mais.")
+                        egui::RichText::new(t().sign_in_invite)
                             .color(theme::TEXT_DIM)
                             .font(theme::regular(13.0)),
                     )
                     .wrap(),
                 );
                 ui.add_space(10.0);
-                let label = if cx.me.signing_in { "Entrando…" } else { "Fazer login" };
+                let label = if cx.me.signing_in { t().signing_in } else { t().sign_in };
                 if kit::pill(ui, Some(icons::LOG_IN), label, false).clicked() && !cx.me.signing_in {
                     cx.act(Action::SignIn);
                 }
@@ -141,13 +142,32 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
                 // Para quando o Google recusar a janela embutida.
                 let alt = ui
                     .add(
-                        egui::Label::new(egui::RichText::new("Entrar com os cookies do navegador").color(theme::TEXT_FAINT).font(theme::regular(12.0)))
+                        egui::Label::new(egui::RichText::new(t().sign_in_with_cookies).color(theme::TEXT_FAINT).font(theme::regular(12.0)))
                             .sense(Sense::click()),
                     )
                     .on_hover_cursor(CursorIcon::PointingHand);
                 if alt.clicked() {
                     cx.act(Action::Dialog(super::Dialog::Cookies { text: String::new(), error: None }));
                 }
+                // Sem conta não há o menu da foto: o idioma fica aqui.
+                ui.add_space(14.0);
+                let text = format!("{}: {}", t().language, language_label(cx.language));
+                let r = ui
+                    .horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                        icons::paint(ui.painter(), r, icons::GLOBE, theme::TEXT_FAINT);
+                        ui.add(egui::Label::new(egui::RichText::new(text).color(theme::TEXT_FAINT).font(theme::regular(12.0))).sense(Sense::click()))
+                    })
+                    .inner
+                    .on_hover_cursor(CursorIcon::PointingHand);
+                egui::Popup::menu(&r).width(LANGUAGE_W).show(|ui| {
+                    ui.set_width(LANGUAGE_W);
+                    for choice in LANGUAGES {
+                        if language_choice(ui, cx, choice, LANGUAGE_W) {
+                            ui.close();
+                        }
+                    }
+                });
             });
         });
         return;
@@ -155,7 +175,7 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
 
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        if kit::pill(ui, Some(icons::PLUS), "Nova playlist", false).clicked() {
+        if kit::pill(ui, Some(icons::PLUS), t().new_playlist, false).clicked() {
             cx.act(Action::Dialog(super::Dialog::NewPlaylist {
                 title: String::new(),
                 privacy: musicfast_ytm::Privacy::Private,
@@ -165,7 +185,7 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
     });
     ui.add_space(10.0);
     egui::ScrollArea::vertical().id_salt("playlists-lado").auto_shrink([false, false]).show(ui, |ui| {
-        let liked = ("VLLM".to_owned(), "Músicas curtidas".to_owned(), "Playlist automática".to_owned());
+        let liked = ("VLLM".to_owned(), t().liked_songs.to_owned(), t().auto_playlist.to_owned());
         let mut rows = vec![liked];
         rows.extend(
             cx.me
@@ -204,14 +224,14 @@ fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
         let w = 128.0;
         let area = Rect::from_center_size(pos2(rect.right() - 24.0 - w / 2.0, cy), vec2(w, 36.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        let label = if cx.me.signing_in { "Entrando…" } else { "Fazer login" };
+        let label = if cx.me.signing_in { t().signing_in } else { t().sign_in };
         let r = kit::pill(&mut child, None, label, true);
         if r.clicked() && !cx.me.signing_in {
             cx.act(Action::SignIn);
         }
         // Plano B, pelo botão direito: colar os cookies do navegador.
         r.context_menu(|ui| {
-            if ui.button("Entrar colando os cookies do navegador…").clicked() {
+            if ui.button(t().sign_in_pasting_cookies).clicked() {
                 cx.act(Action::Dialog(super::Dialog::Cookies { text: String::new(), error: None }));
             }
         });
@@ -248,16 +268,18 @@ fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
                 menu_divider(ui);
             }
             for (icon, label, target) in [
-                (icons::LIBRARY, "Sua biblioteca", View::Library(LibraryTab::Playlists)),
-                (icons::THUMBS_UP, "Músicas curtidas", View::browse("VLLM", None)),
-                (icons::HISTORY, "Histórico", View::Library(LibraryTab::History)),
+                (icons::LIBRARY, t().your_library, View::Library(LibraryTab::Playlists)),
+                (icons::THUMBS_UP, t().liked_songs, View::browse("VLLM", None)),
+                (icons::HISTORY, t().history, View::Library(LibraryTab::History)),
             ] {
                 if menu_row(ui, icon, label) {
                     cx.act(Action::Open(target));
                 }
             }
             menu_divider(ui);
-            if menu_row(ui, icons::LOG_OUT, "Sair") {
+            language_rows(ui, cx);
+            menu_divider(ui);
+            if menu_row(ui, icons::LOG_OUT, t().sign_out) {
                 cx.act(Action::SignOut);
             }
         });
@@ -284,7 +306,7 @@ fn account_header(ui: &mut Ui, cx: &mut Cx, account: &musicfast_ytm::Account) {
         let handle = kit::one_line(ui, &account.handle, theme::regular(13.5), theme::TEXT_DIM, w);
         ui.painter().galley(pos2(x, avatar.top() + 23.0), handle, theme::TEXT_DIM);
     }
-    let link = kit::one_line(ui, "Gerenciar sua Conta do Google", theme::medium(13.5), theme::LINK, w);
+    let link = kit::one_line(ui, t().manage_google_account, theme::medium(13.5), theme::LINK, w);
     if let Some(r) = kit::text_link(ui, pos2(x, avatar.bottom() + 6.0), link, theme::LINK, Id::new("conta-google"), true)
         && r.clicked()
     {
@@ -296,6 +318,66 @@ fn account_header(ui: &mut Ui, cx: &mut Cx, account: &musicfast_ytm::Account) {
 fn menu_divider(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(MENU_W, 17.0), Sense::hover());
     ui.painter().hline(rect.x_range(), rect.center().y, egui::Stroke::new(1.0, theme::BORDER));
+}
+
+/// O idioma do sistema e os que o app fala, na ordem do seletor.
+const LANGUAGES: [Option<Lang>; 4] = [None, Some(Lang::Pt), Some(Lang::En), Some(Lang::Es)];
+const LANGUAGE_W: f32 = 240.0;
+
+/// "Português", ou "Automático (Português)" quando segue o sistema.
+fn language_label(choice: Option<Lang>) -> String {
+    match choice {
+        Some(lang) => lang.native_name().to_owned(),
+        None => t().language_auto(musicfast_i18n::system().lang.native_name()),
+    }
+}
+
+/// No menu da conta: "Idioma: Português", que abre as escolhas logo abaixo
+/// (um submenu dentro do menu da foto fecharia os dois).
+fn language_rows(ui: &mut Ui, cx: &mut Cx) {
+    let open_id = Id::new("menu-idioma-aberto");
+    let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    let (rect, response) = ui.allocate_exact_size(vec2(MENU_W, 42.0), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, theme::MENU_HOVER);
+    }
+    let r = Rect::from_center_size(pos2(rect.left() + 28.0, rect.center().y), vec2(20.0, 20.0));
+    icons::paint(ui.painter(), r, icons::GLOBE, theme::TEXT);
+    let text = format!("{}: {}", t().language, language_label(cx.language));
+    let galley = kit::one_line(ui, &text, theme::regular(14.5), theme::TEXT, MENU_W - 56.0 - 44.0);
+    ui.painter().galley(pos2(rect.left() + 56.0, rect.center().y - galley.size().y / 2.0), galley, theme::TEXT);
+    let chevron = Rect::from_center_size(pos2(rect.right() - 24.0, rect.center().y), vec2(18.0, 18.0));
+    icons::paint(ui.painter(), chevron, if open { icons::CHEVRON_UP } else { icons::CHEVRON_DOWN }, theme::TEXT_DIM);
+    if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+        ui.data_mut(|d| d.insert_temp(open_id, !open));
+    }
+    if open {
+        for choice in LANGUAGES {
+            if language_choice(ui, cx, choice, MENU_W) {
+                ui.data_mut(|d| d.insert_temp(open_id, false));
+                ui.close();
+            }
+        }
+    }
+}
+
+/// Uma escolha de idioma, com o visto na que vale. `true` no clique.
+fn language_choice(ui: &mut Ui, cx: &mut Cx, choice: Option<Lang>, width: f32) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 36.0), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, theme::MENU_HOVER);
+    }
+    if cx.language == choice {
+        let r = Rect::from_center_size(pos2(rect.left() + 28.0, rect.center().y), vec2(16.0, 16.0));
+        icons::paint(ui.painter(), r, icons::CHECK, theme::TEXT);
+    }
+    let galley = kit::one_line(ui, &language_label(choice), theme::regular(14.0), theme::TEXT, width - 56.0 - 12.0);
+    ui.painter().galley(pos2(rect.left() + 56.0, rect.center().y - galley.size().y / 2.0), galley, theme::TEXT);
+    let clicked = response.on_hover_cursor(CursorIcon::PointingHand).clicked();
+    if clicked && cx.language != choice {
+        cx.act(Action::SetLanguage(choice));
+    }
+    clicked
 }
 
 fn menu_row(ui: &mut Ui, icon: icons::Icon, text: &str) -> bool {
@@ -330,8 +412,8 @@ pub fn top(ui: &mut Ui, cx: &mut Cx, search: &mut SearchBox, can_back: bool, can
     let cy = rect.center().y;
     let mut x = rect.left() + 24.0;
     for (icon, enabled, action, tip) in [
-        (icons::ARROW_LEFT, can_back, Action::Back, "Voltar (Alt+←)"),
-        (icons::CHEVRON_RIGHT, can_forward, Action::Forward, "Avançar (Alt+→)"),
+        (icons::ARROW_LEFT, can_back, Action::Back, t().back_tip),
+        (icons::CHEVRON_RIGHT, can_forward, Action::Forward, t().forward_tip),
     ] {
         let r = Rect::from_center_size(pos2(x, cy), vec2(36.0, 36.0));
         let resp = ui.interact(r, Id::new(("nav", tip)), if enabled { Sense::click() } else { Sense::hover() });
@@ -371,7 +453,7 @@ pub fn top(ui: &mut Ui, cx: &mut Cx, search: &mut SearchBox, can_back: bool, can
         egui::TextEdit::singleline(&mut search.text)
             .id(edit_id)
             .frame(egui::Frame::NONE)
-            .hint_text(egui::RichText::new("Buscar músicas, álbuns, artistas, podcasts").color(theme::TEXT_FAINT))
+            .hint_text(egui::RichText::new(t().search_hint).color(theme::TEXT_FAINT))
             .font(theme::regular(15.0))
             .desired_width(edit_rect.width()),
     );

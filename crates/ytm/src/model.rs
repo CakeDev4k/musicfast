@@ -250,10 +250,11 @@ impl Privacy {
     pub const ALL: [Self; 3] = [Self::Private, Self::Unlisted, Self::Public];
 
     pub fn label(self) -> &'static str {
+        let t = musicfast_i18n::t();
         match self {
-            Self::Private => "Particular",
-            Self::Unlisted => "Não listada",
-            Self::Public => "Pública",
+            Self::Private => t.private,
+            Self::Unlisted => t.unlisted,
+            Self::Public => t.public,
         }
     }
 
