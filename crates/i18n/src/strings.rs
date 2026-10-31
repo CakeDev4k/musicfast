@@ -154,6 +154,8 @@ pub struct Strings {
     pub translation_font: &'static str,
     pub lyrics_romaji: &'static str,
     pub lyrics_romaji_hint: &'static str,
+    pub lyrics_hover_buttons: &'static str,
+    pub lyrics_hover_buttons_hint: &'static str,
     pub translation_hint: &'static str,
     pub translation_shape: &'static str,
     pub translation_below: &'static str,
@@ -242,6 +244,47 @@ pub struct Strings {
 
     // A personalização do player.
     pub customize_player: &'static str,
+    pub bar_buttons: &'static str,
+    pub bar_hint: &'static str,
+    pub bar_restore: &'static str,
+    pub bar_zone_left: &'static str,
+    pub bar_zone_track: &'static str,
+    pub bar_zone_center: &'static str,
+    pub bar_zone_right: &'static str,
+    pub bar_catalog: &'static str,
+    pub bar_catalog_hint: &'static str,
+    pub bar_drop_remove: &'static str,
+    pub bar_faded: &'static str,
+    pub bar_drop_here: &'static str,
+    pub item_play_pause: &'static str,
+    pub item_repeat: &'static str,
+    pub item_time: &'static str,
+    pub item_menu: &'static str,
+    pub item_volume: &'static str,
+    pub item_queue: &'static str,
+    pub item_lyrics: &'static str,
+    pub item_mini: &'static str,
+    pub item_expand: &'static str,
+    pub item_download: &'static str,
+    pub item_save: &'static str,
+    pub item_album: &'static str,
+    pub item_artist: &'static str,
+    pub item_personalize: &'static str,
+    pub copy_link: &'static str,
+    pub link_copied: &'static str,
+    pub item_seek_back: &'static str,
+    pub item_seek_forward: &'static str,
+    pub discord_show: &'static str,
+    pub discord_showing: &'static str,
+    pub discord_waiting: &'static str,
+    pub discord_refused: &'static str,
+    pub discord_off: &'static str,
+    pub discord_promote: &'static str,
+    pub discord_promote_hint: &'static str,
+    pub discord_site_button: &'static str,
+    pub discord_listen: &'static str,
+    pub discord_turned_on: &'static str,
+    pub discord_turned_off: &'static str,
     pub player_background: &'static str,
     pub look_section_background: &'static str,
     pub look_dim: &'static str,
@@ -295,6 +338,12 @@ pub struct Strings {
     pub surface_bar: &'static str,
     pub surface_mini: &'static str,
     pub surface_home: &'static str,
+    pub look_section_mini: &'static str,
+    pub mini_drag_hint: &'static str,
+    pub mini_size: &'static str,
+    pub mini_lyrics_divider: &'static str,
+    pub mini_lyrics_divider_hint: &'static str,
+    pub mini_buttons_group: &'static str,
     pub pick_from_computer: &'static str,
     pub drop_hint: &'static str,
     pub or_paste_link: &'static str,
@@ -336,6 +385,48 @@ pub struct Strings {
     pub(crate) audio_no_decoder: &'static str,
     pub audio_corrupted: &'static str,
     pub audio_decoder_failed: &'static str,
+
+    // As músicas baixadas (para ouvir sem internet e arrastar para fora).
+    pub downloads: &'static str,
+    pub download: &'static str,
+    pub delete_download: &'static str,
+    pub show_in_folder: &'static str,
+    pub open_folder: &'static str,
+    pub download_queued: &'static str,
+    pub download_preparing: &'static str,
+    pub download_saving: &'static str,
+    pub drag_out_hint: &'static str,
+    pub change_folder: &'static str,
+    pub change_folder_hint: &'static str,
+    pub default_folder: &'static str,
+    pub(crate) saving_to: &'static str,
+    pub(crate) folder_unusable: &'static str,
+    pub no_downloads: &'static str,
+    pub(crate) download_failed_retry: &'static str,
+    pub(crate) downloads_one: &'static str,
+    pub(crate) downloads_many: &'static str,
+    pub interface: &'static str,
+    pub interface_classic: &'static str,
+    pub interface_panels: &'static str,
+    pub show_all: &'static str,
+    pub album: &'static str,
+    pub filter_library: &'static str,
+    pub add_account: &'static str,
+    pub(crate) switch_to: &'static str,
+    pub(crate) now_in_account: &'static str,
+    pub filter_downloads: &'static str,
+    pub no_album: &'static str,
+    pub unknown_artist: &'static str,
+    pub various_artists: &'static str,
+    pub sort_recent: &'static str,
+    pub sort_title: &'static str,
+    pub sort_artist: &'static str,
+    pub(crate) songs_one: &'static str,
+    pub(crate) songs_many: &'static str,
+    pub(crate) albums_one: &'static str,
+    pub(crate) albums_many: &'static str,
+    pub(crate) delete_download_failed: &'static str,
+    pub(crate) drag_out_failed: &'static str,
 }
 
 fn fill(template: &str, value: impl std::fmt::Display) -> String {
@@ -461,5 +552,49 @@ impl Strings {
 
     pub fn audio_no_decoder(&self, error: &str) -> String {
         fill(self.audio_no_decoder, error)
+    }
+
+    pub fn download_failed_retry(&self, error: &str) -> String {
+        fill(self.download_failed_retry, error)
+    }
+
+    /// "1 música" ou "12 músicas", e que tocam sem internet.
+    pub fn downloads_count(&self, n: usize) -> String {
+        if n == 1 { self.downloads_one.to_owned() } else { fill(self.downloads_many, n) }
+    }
+
+    /// A dica da foto de outra conta.
+    pub fn switch_to(&self, name: &str) -> String {
+        fill(self.switch_to, name)
+    }
+
+    pub fn now_in_account(&self, name: &str) -> String {
+        fill(self.now_in_account, name)
+    }
+
+    /// "1 música" ou "12 músicas".
+    pub fn songs_count(&self, n: usize) -> String {
+        if n == 1 { self.songs_one.to_owned() } else { fill(self.songs_many, n) }
+    }
+
+    /// "1 álbum" ou "3 álbuns".
+    pub fn albums_count(&self, n: usize) -> String {
+        if n == 1 { self.albums_one.to_owned() } else { fill(self.albums_many, n) }
+    }
+
+    pub fn delete_download_failed(&self, error: &str) -> String {
+        fill(self.delete_download_failed, error)
+    }
+
+    pub fn drag_out_failed(&self, error: &str) -> String {
+        fill(self.drag_out_failed, error)
+    }
+
+    pub fn saving_to(&self, dir: &str) -> String {
+        fill(self.saving_to, dir)
+    }
+
+    pub fn folder_unusable(&self, error: &str) -> String {
+        fill(self.folder_unusable, error)
     }
 }

@@ -72,7 +72,7 @@ pub fn run() -> ! {
         let state = PageState { page: Some(Arc::new(page_data)), ..PageState::default() };
         let stats = scroll(&ctx, |ui| {
             let mut actions = Vec::new();
-            let mut cx = Cx { covers: &mut covers, actions: &mut actions, me: &me, language: None, latency: 0.0, translate_lyrics: false, lyrics_style: &crate::look::LyricsStyle::default(), current: Some("v7".into()), playing: true };
+            let mut cx = Cx { covers: &mut covers, actions: &mut actions, me: &me, language: None, latency: 0.0, translate_lyrics: false, lyrics_style: &crate::look::LyricsStyle::default(), current: Some("v7".into()), playing: true, offline: None };
             page::show(ui, &mut cx, &view, &state);
         });
         stats.print(name);
@@ -85,7 +85,7 @@ pub fn run() -> ! {
     };
     let stats = scroll(&ctx, |ui| {
         let mut actions = Vec::new();
-        let mut cx = Cx { covers: &mut covers, actions: &mut actions, me: &me, language: None, latency: 0.0, translate_lyrics: false, lyrics_style: &crate::look::LyricsStyle::default(), current: Some("v10".into()), playing: true };
+        let mut cx = Cx { covers: &mut covers, actions: &mut actions, me: &me, language: None, latency: 0.0, translate_lyrics: false, lyrics_style: &crate::look::LyricsStyle::default(), current: Some("v10".into()), playing: true, offline: None };
         side::queue_list(ui, &mut cx, &snap, false);
     });
     stats.print("fila 2.000 músicas");
@@ -291,7 +291,7 @@ mod tests {
         for i in 0..6 {
             let (ui_ms, _, vertices) = frame(&ctx, Vec::new(), i as f64 / 60.0, |ui| {
                 let mut actions = Vec::new();
-                let mut cx = Cx { covers: &mut covers, actions: &mut actions, me: &me, language: None, latency: 0.0, translate_lyrics: false, lyrics_style: &crate::look::LyricsStyle::default(), current: None, playing: false };
+                let mut cx = Cx { covers: &mut covers, actions: &mut actions, me: &me, language: None, latency: 0.0, translate_lyrics: false, lyrics_style: &crate::look::LyricsStyle::default(), current: None, playing: false, offline: None };
                 page::show(ui, &mut cx, &view, &state);
             });
             assert!(vertices > 0);

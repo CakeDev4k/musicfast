@@ -56,6 +56,11 @@ impl Audio {
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
+
+    /// Os bytes, sem cópia quando ninguém mais os segura.
+    pub(crate) fn into_vec(self) -> Vec<u8> {
+        Arc::try_unwrap(self.0).unwrap_or_else(|shared| (*shared).clone())
+    }
 }
 
 impl From<Vec<u8>> for Audio {
@@ -71,6 +76,12 @@ impl AsRef<[u8]> for Audio {
 }
 
 pub fn fetch(http: &reqwest::blocking::Client, r: &Resolved) -> Result<Audio, FetchError> {
+    fetch_with(http, r, &mut |_, _| {})
+}
+
+/// Como `fetch`, contando o que já desceu (bytes, e o total quando se sabe)
+/// a cada pedaço: o download para ouvir sem internet mostra o progresso.
+pub fn fetch_with(http: &reqwest::blocking::Client, r: &Resolved, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<Audio, FetchError> {
     let started = std::time::Instant::now();
     // O endereço do cliente de TV leva 403 até o `available_at` (o yt-dlp
     // dorme o mesmo tempo antes de baixar). Teto de 10 s: além disso, a
@@ -101,9 +112,18 @@ pub fn fetch(http: &reqwest::blocking::Client, r: &Resolved) -> Result<Audio, Fe
             s => return Err(FetchError::Other(t.audio_server_answered(s))),
         }
         let before = data.len();
-        resp.take(CHUNK + 1)
-            .read_to_end(&mut data)
-            .map_err(|e| FetchError::Other(t.download_interrupted(&e.to_string())))?;
+        // Em pedaços de 256 kB, para o progresso andar dentro do pedido.
+        let mut body = resp.take(CHUNK + 1);
+        loop {
+            let read = (&mut body)
+                .take(256 * 1024)
+                .read_to_end(&mut data)
+                .map_err(|e| FetchError::Other(t.download_interrupted(&e.to_string())))?;
+            if read == 0 {
+                break;
+            }
+            progress(data.len() as u64, r.size);
+        }
         let got = (data.len() - before) as u64;
         if data.len() > MAX_BYTES {
             return Err(FetchError::Other(t.audio_too_long.into()));

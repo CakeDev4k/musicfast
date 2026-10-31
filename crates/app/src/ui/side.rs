@@ -92,7 +92,7 @@ pub fn queue_list(ui: &mut Ui, cx: &mut Cx, snap: &Snapshot, big: bool) {
             let color = if big && is_current {
                 theme::TEXT
             } else if is_current {
-                theme::ACCENT
+                theme::accent()
             } else if past {
                 theme::TEXT_FAINT
             } else {

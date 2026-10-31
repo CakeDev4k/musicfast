@@ -38,9 +38,17 @@ Download it from the [releases page](https://github.com/CakeDev4k/musicfast/rele
   em 11 estilos, com cores, quantidade, sensibilidade, opacidade, espessura
   e brilho ajustáveis.
 - Fila, aleatório, repetir, pré-carga da próxima música.
-- Leve no disco: a música toca da memória e nunca é gravada; letras, capas
-  e o cache do login têm teto, se limpam sozinhos e podem ser apagados em
-  **Armazenamento e cache**, no menu da conta.
+- Músicas baixadas para ouvir sem internet, em **Baixadas**: escolha a pasta
+  e arraste o arquivo para fora do app, para o Premiere, o Explorer ou o
+  WhatsApp.
+- Botões da barra do seu jeito, em **Botões do player**: arraste na barra em
+  miniatura e escolha entre 24 botões.
+- A música no perfil do Discord, com um botão para baixar o MusicFast que dá
+  para desligar. Vem desligado; é você quem decide mostrar o que ouve.
+- Duas organizações da janela (clássica e painéis) e várias contas Google.
+- Leve no disco: a música toca da memória e só vai para o disco se você
+  baixar; letras, capas e o cache do login têm teto, se limpam sozinhos e
+  podem ser apagados em **Armazenamento e cache**, no menu da conta.
 - Controles de mídia do sistema (teclas de mídia, o painel do Windows, MPRIS
   no Linux, Now Playing no macOS).
 - Atualização automática pelas releases do GitHub, com o pacote conferido

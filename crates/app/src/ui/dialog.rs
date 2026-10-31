@@ -3,7 +3,7 @@
 //! recusar o navegador embutido).
 
 use egui::ecolor::Hsva;
-use egui::{Color32, CornerRadius, CursorIcon, Id, Mesh, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Color32, CornerRadius, CursorIcon, Id, Mesh, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use musicfast_i18n::t;
 use musicfast_ytm::{Privacy, Track};
 
@@ -11,6 +11,9 @@ use super::icons;
 use super::kit;
 use super::theme;
 use super::{Action, Cx};
+use super::Shell;
+use crate::bar_layout::{Item, Layout, Layouts, Zone};
+use crate::discord::Link;
 use crate::look::{Backdrop, Image, Images, Look, Now, PRESETS, Skin, Surface};
 use crate::viz::{Viz, VizCfg, VizColor};
 
@@ -25,6 +28,9 @@ pub enum Dialog {
     /// "Armazenamento e cache": o que o cache ocupa (`None` enquanto mede)
     /// e se a limpeza está rodando.
     Storage { usage: Option<crate::storage::Usage>, busy: bool },
+    /// "Botões do player": os arranjos e as escolhas do Discord em edição, e
+    /// como está a ligação com ele.
+    Bar { layouts: Layouts, discord: crate::discord::Settings, link: Link },
 }
 
 /// Desenha o diálogo aberto; `true` quando ele deve fechar.
@@ -39,12 +45,13 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, cx: &mut Cx, images: &Imag
                 .inner_margin(egui::Margin::same(22)),
         )
         .show(ctx, |ui| {
-            ui.set_width(if matches!(dialog, Dialog::Look { .. }) { 540.0 } else { 420.0 });
+            ui.set_width(if matches!(dialog, Dialog::Look { .. } | Dialog::Bar { .. }) { 600.0 } else { 420.0 });
             match dialog {
                 Dialog::NewPlaylist { title, privacy, track } => close = new_playlist(ui, cx, title, privacy, track),
                 Dialog::SaveTo { track } => close = save_to(ui, cx, track),
                 Dialog::Cookies { text, error } => close = cookies(ui, cx, text, error),
                 Dialog::Storage { usage, busy } => close = storage(ui, cx, *usage, busy),
+                Dialog::Bar { layouts, discord, link } => close = bar_buttons(ui, cx, layouts, discord, *link),
                 Dialog::Look { look, surface, url, hsv, custom } => {
                     close = personalize(ui, cx, look, surface, url, hsv, custom, images, now);
                 }
@@ -217,7 +224,7 @@ fn cookies(ui: &mut Ui, cx: &mut Cx, text: &mut String, error: &mut Option<Strin
     );
     if let Some(e) = error {
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(e.as_str()).color(theme::ACCENT));
+        ui.label(egui::RichText::new(e.as_str()).color(theme::accent()));
     }
     ui.add_space(16.0);
     let mut close = false;
@@ -235,6 +242,466 @@ fn cookies(ui: &mut Ui, cx: &mut Cx, text: &mut String, error: &mut Option<Strin
         }
     });
     close
+}
+
+/// "Botões do player": a barra em miniatura, todos os botões e as duas
+/// escolhas do Discord. Cada mudança vale na hora, com a barra de verdade à
+/// vista atrás.
+fn bar_buttons(ui: &mut Ui, cx: &mut Cx, layouts: &mut Layouts, discord: &mut crate::discord::Settings, link: Link) -> bool {
+    heading(ui, t().bar_buttons);
+    let shell = if theme::panels() { Shell::Panels } else { Shell::Classic };
+    let signed_in = cx.me.signed_in;
+    // Na janela mínima o conteúdo não cabe e rola; o rodapé fica à vista.
+    let max_h = (ui.ctx().content_rect().height() - 190.0).max(200.0);
+    egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+        let width = ui.available_width();
+        if bar_editor(ui, layouts.of_mut(shell), shell, signed_in, width) {
+            cx.act(Action::SetBar(layouts.clone()));
+        }
+        if discord_rows(ui, discord, link, width) {
+            cx.act(Action::SetDiscord(discord.clone()));
+        }
+    });
+    ui.add_space(16.0);
+    let mut close = false;
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if kit::pill(ui, None, t().close, true).clicked() {
+            close = true;
+        }
+        if kit::pill(ui, None, t().bar_restore, false).clicked() {
+            *layouts.of_mut(shell) = Layout::of(shell);
+            cx.act(Action::SetBar(layouts.clone()));
+        }
+    });
+    close
+}
+
+fn item_icon(item: Item) -> icons::Icon {
+    match item {
+        Item::Previous => icons::SKIP_BACK,
+        Item::PlayPause => icons::PLAY,
+        Item::Next => icons::SKIP_FORWARD,
+        Item::Shuffle => icons::SHUFFLE,
+        Item::Repeat => icons::REPEAT,
+        Item::Time => icons::AUDIO_WAVEFORM,
+        Item::Like => icons::THUMBS_UP,
+        Item::Dislike => icons::THUMBS_DOWN,
+        Item::Menu => icons::ELLIPSIS_VERTICAL,
+        Item::Volume => icons::VOLUME_2,
+        Item::Queue => icons::LIST_MUSIC,
+        Item::Lyrics => icons::MIC_VOCAL,
+        Item::Mini => icons::PIN,
+        Item::Expand => icons::MAXIMIZE_2,
+        Item::Discord => icons::DISCORD,
+        Item::Download => icons::DOWNLOAD,
+        Item::Save => icons::BOOKMARK_PLUS,
+        Item::Radio => icons::RADIO,
+        Item::CopyLink => icons::LINK,
+        Item::Album => icons::DISC_3,
+        Item::Artist => icons::USER,
+        Item::Personalize => icons::PALETTE,
+        Item::SeekBack => icons::REWIND,
+        Item::SeekForward => icons::FAST_FORWARD,
+    }
+}
+
+fn item_label(item: Item) -> &'static str {
+    match item {
+        Item::Previous => t().previous,
+        Item::PlayPause => t().item_play_pause,
+        Item::Next => t().next,
+        Item::Shuffle => t().shuffle,
+        Item::Repeat => t().item_repeat,
+        Item::Time => t().item_time,
+        Item::Like => t().liked,
+        Item::Dislike => t().disliked,
+        Item::Menu => t().item_menu,
+        Item::Volume => t().item_volume,
+        Item::Queue => t().item_queue,
+        Item::Lyrics => t().item_lyrics,
+        Item::Mini => t().item_mini,
+        Item::Expand => t().item_expand,
+        Item::Discord => "Discord",
+        Item::Download => t().item_download,
+        Item::Save => t().item_save,
+        Item::Radio => t().radio,
+        Item::CopyLink => t().copy_link,
+        Item::Album => t().item_album,
+        Item::Artist => t().item_artist,
+        Item::Personalize => t().item_personalize,
+        Item::SeekBack => t().item_seek_back,
+        Item::SeekForward => t().item_seek_forward,
+    }
+}
+
+/// A altura da barra em miniatura e as medidas de dentro dela.
+const STRIP_H: f32 = 84.0;
+const STRIP_PAD: f32 = 8.0;
+const TRAY_GAP: f32 = 6.0;
+const TRAY_PAD: f32 = 6.0;
+/// Uma coluna vazia continua larga o bastante para receber um botão.
+const TRAY_MIN: f32 = 84.0;
+/// A capa e o título de mentira, onde a música fica.
+const STUB_W: f32 = 74.0;
+const SLOT: f32 = 34.0;
+/// Com a barra cheia os botões encolhem até aqui.
+const SLOT_MIN: f32 = 15.0;
+const TILE_H: f32 = 34.0;
+const TILE_GAP: f32 = 5.0;
+const TILE_COLUMNS: usize = 3;
+
+/// Uma coluna da barra em miniatura e o lugar de cada botão nela.
+struct Tray {
+    zone: Zone,
+    rect: Rect,
+    slots: Vec<(Item, Rect)>,
+}
+
+/// Quem ocupa mais que um botão comum na barra de verdade também ocupa aqui.
+fn slot_width(layout: &Layout, item: Item, slot: f32, panels: bool) -> f32 {
+    match item {
+        Item::Time => slot * 1.5,
+        Item::Volume if !layout.hover_volume(panels) => slot * 2.0,
+        _ => slot,
+    }
+}
+
+/// A coluna em que a música fica.
+fn track_zone(classic: bool) -> Zone {
+    if classic { Zone::Center } else { Zone::Left }
+}
+
+/// Distribui as três colunas em `strip`, como na barra de verdade: as pontas
+/// do tamanho dos botões e a do meio com o resto.
+fn arrange(layout: &Layout, strip: Rect, classic: bool) -> Vec<Tray> {
+    let inner = strip.shrink(STRIP_PAD);
+    let track = track_zone(classic);
+    let content = |zone: Zone, slot: f32| {
+        let stub = if zone == track { STUB_W } else { 0.0 };
+        stub + layout.zone(zone).iter().map(|i| slot_width(layout, *i, slot, !classic)).sum::<f32>()
+    };
+    let tray_width = |zone: Zone, slot: f32| (content(zone, slot) + TRAY_PAD * 2.0).max(TRAY_MIN);
+    let needed = |slot: f32| Zone::ALL.iter().map(|z| tray_width(*z, slot)).sum::<f32>() + TRAY_GAP * 2.0;
+    let mut slot = SLOT;
+    while slot > SLOT_MIN && needed(slot) > inner.width() {
+        slot -= 1.0;
+    }
+    let left_end = inner.left() + tray_width(Zone::Left, slot);
+    let right_start = inner.right() - tray_width(Zone::Right, slot);
+    let spans = [(inner.left(), left_end), (left_end + TRAY_GAP, right_start - TRAY_GAP), (right_start, inner.right())];
+    Zone::ALL
+        .into_iter()
+        .zip(spans)
+        .map(|(zone, (left, right))| {
+            let rect = Rect::from_x_y_ranges(left..=right, inner.y_range());
+            let mut x = rect.left() + TRAY_PAD;
+            if zone == track {
+                x += STUB_W;
+            } else if zone == Zone::Center {
+                x = rect.center().x - content(zone, slot) / 2.0;
+            }
+            let top = rect.bottom() - TRAY_PAD - SLOT;
+            let slots = layout
+                .zone(zone)
+                .iter()
+                .map(|item| {
+                    let w = slot_width(layout, *item, slot, !classic);
+                    let rect = Rect::from_min_size(pos2(x, top), vec2(w, SLOT));
+                    x += w;
+                    (*item, rect)
+                })
+                .collect();
+            Tray { zone, rect, slots }
+        })
+        .collect()
+}
+
+/// Onde o botão solto em `p` entra: na coluna mais perto, antes do primeiro
+/// que está à direita do ponteiro. O lugar não conta o botão na mão.
+fn drop_target(trays: &[Tray], p: Pos2) -> (Zone, usize) {
+    let away = |t: &Tray| (p.x - p.x.clamp(t.rect.left(), t.rect.right())).abs();
+    let tray = trays.iter().min_by(|a, b| away(a).total_cmp(&away(b))).expect("três colunas");
+    (tray.zone, tray.slots.iter().filter(|(_, r)| r.center().x < p.x).count())
+}
+
+fn paint_item_icon(painter: &egui::Painter, rect: Rect, item: Item, color: Color32) {
+    if item == Item::Discord {
+        icons::paint_discord(painter, rect, color);
+    } else {
+        icons::paint(painter, rect, item_icon(item), color);
+    }
+}
+
+/// O botão como ele fica na barra.
+fn paint_slot(painter: &egui::Painter, rect: Rect, item: Item, color: Color32) {
+    // Com a barra cheia a vaga encolhe, e o ícone junto.
+    let side = (rect.height().min(rect.width()) - 4.0).min(16.0);
+    let icon = |center: Pos2| Rect::from_center_size(center, vec2(side, side));
+    match item {
+        Item::Time => {
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "2:20", theme::regular(12.0), color);
+        }
+        Item::PlayPause => icons::paint_filled(painter, icon(rect.center()), icons::PLAY, color),
+        Item::Volume if rect.width() > rect.height() * 1.5 => {
+            let at = pos2(rect.left() + rect.height() / 2.0, rect.center().y);
+            paint_item_icon(painter, icon(at), item, color);
+            painter.hline((at.x + 13.0)..=(rect.right() - 8.0), at.y, Stroke::new(2.0, color));
+        }
+        _ => paint_item_icon(painter, icon(rect.center()), item, color),
+    }
+}
+
+/// A capa e as linhas de mentira: é ali que a música aparece na barra.
+fn paint_track_stub(painter: &egui::Painter, tray: Rect) {
+    let top = tray.bottom() - TRAY_PAD - SLOT;
+    let art = Rect::from_min_size(pos2(tray.left() + TRAY_PAD + 2.0, top + 2.0), vec2(30.0, 30.0));
+    painter.rect_filled(art, CornerRadius::same(4), theme::GLASS_HOVER);
+    icons::paint(painter, art.shrink(8.0), icons::MUSIC_2, theme::TEXT_DIM);
+    for (y, w) in [(top + 11.0, 28.0), (top + 21.0, 20.0)] {
+        painter.hline((art.right() + 6.0)..=(art.right() + 6.0 + w), y, Stroke::new(3.0, theme::GLASS_HOVER));
+    }
+}
+
+/// Em que linha e coluna fica o botão `i` de `total`. A última linha, quando
+/// não enche, fica centralizada: a coluna pode ser fracionária.
+fn tile_place(i: usize, total: usize) -> (usize, f32) {
+    let (row, column) = (i / TILE_COLUMNS, i % TILE_COLUMNS);
+    let in_row = (total - row * TILE_COLUMNS).min(TILE_COLUMNS);
+    (row, column as f32 + (TILE_COLUMNS - in_row) as f32 / 2.0)
+}
+
+/// O que a pessoa fez nesta passada.
+#[derive(Default)]
+struct Pending {
+    grabbed: Option<Item>,
+    toggled: Option<Item>,
+    removed: Option<Item>,
+}
+
+/// A barra em miniatura: os botões se afastam para abrir a vaga de quem está
+/// na mão, e um × aparece sob o mouse.
+#[allow(clippy::too_many_arguments)]
+fn bar_strip(ui: &mut Ui, strip: Rect, view: &Layout, classic: bool, held: Option<Item>, target: Option<Zone>, hidden: &[Item], pending: &mut Pending) {
+    ui.painter().rect_filled(strip, CornerRadius::same(12), PANEL);
+    let titles = [
+        if classic { t().bar_zone_left } else { t().bar_zone_track },
+        if classic { t().bar_zone_track } else { t().bar_zone_center },
+        t().bar_zone_right,
+    ];
+    let glide = |ui: &Ui, id: Id, x: f32| ui.ctx().animate_value_with_time(id, x, 0.12);
+    for (tray, title) in arrange(view, strip, classic).into_iter().zip(titles) {
+        let left = glide(ui, Id::new(("coluna-esquerda", tray.zone)), tray.rect.left());
+        let right = glide(ui, Id::new(("coluna-direita", tray.zone)), tray.rect.right());
+        let rect = Rect::from_x_y_ranges(left..=right, tray.rect.y_range());
+        let over = target == Some(tray.zone);
+        ui.painter().rect_filled(rect, CornerRadius::same(8), Color32::from_white_alpha(if over { 16 } else { 7 }));
+        if over {
+            ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
+        }
+        ui.painter().text(pos2(rect.left() + 8.0, rect.top() + 6.0), egui::Align2::LEFT_TOP, title, theme::regular(11.5), if over { theme::TEXT } else { theme::TEXT_FAINT });
+        if tray.zone == track_zone(classic) {
+            paint_track_stub(ui.painter(), rect);
+        } else if tray.slots.is_empty() {
+            let center = pos2(rect.center().x, rect.bottom() - TRAY_PAD - SLOT / 2.0);
+            ui.painter().text(center, egui::Align2::CENTER_CENTER, t().bar_drop_here, theme::regular(12.0), theme::TEXT_FAINT);
+        }
+        for (item, slot) in tray.slots {
+            let x = glide(ui, Id::new(("vaga", item)), slot.left());
+            let slot = Rect::from_min_size(pos2(x, slot.top()), slot.size());
+            if held == Some(item) {
+                ui.painter().rect_filled(slot.shrink(2.0), CornerRadius::same(8), Color32::from_white_alpha(20));
+                continue;
+            }
+            let response = ui.interact(slot, Id::new(("botao-barra", item)), Sense::click_and_drag()).on_hover_cursor(CursorIcon::Grab);
+            if response.drag_started() {
+                pending.grabbed = Some(item);
+            }
+            if response.hovered() {
+                ui.painter().rect_filled(slot.shrink(1.0), CornerRadius::same(8), theme::GLASS_HOVER);
+            }
+            paint_slot(ui.painter(), slot, item, if hidden.contains(&item) { theme::TEXT_FAINT } else { theme::TEXT });
+            if held.is_none() && ui.rect_contains_pointer(slot) {
+                let corner = Rect::from_center_size(slot.right_top() + vec2(-5.0, 5.0), vec2(16.0, 16.0));
+                let remove = ui.interact(corner, Id::new(("tirar-botao", item)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+                ui.painter().circle_filled(corner.center(), 8.0, if remove.hovered() { theme::accent() } else { theme::ACTIVE });
+                icons::paint(ui.painter(), corner.shrink(4.0), icons::X, theme::TEXT);
+                if remove.clicked() {
+                    pending.removed = Some(item);
+                }
+            }
+            response.on_hover_text(item_label(item));
+        }
+    }
+}
+
+/// Todos os botões: clicar liga ou desliga, e daqui também dá para arrastar
+/// até o lugar exato na barra.
+fn bar_catalog(ui: &mut Ui, layout: &Layout, held: Option<Item>, pending: &mut Pending, width: f32) {
+    let (head, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+    let title = ui.painter().text(head.left_center(), egui::Align2::LEFT_CENTER, t().bar_catalog, theme::medium(13.5), theme::TEXT);
+    ui.painter().text(pos2(title.right() + 10.0, head.center().y), egui::Align2::LEFT_CENTER, t().bar_catalog_hint, theme::regular(12.0), theme::TEXT_FAINT);
+    ui.add_space(6.0);
+    let rows = Item::ALL.len().div_ceil(TILE_COLUMNS);
+    let (grid, _) = ui.allocate_exact_size(vec2(width, rows as f32 * (TILE_H + TILE_GAP) - TILE_GAP), Sense::hover());
+    let tile_w = (width - TILE_GAP * (TILE_COLUMNS - 1) as f32) / TILE_COLUMNS as f32;
+    for (i, item) in Item::ALL.into_iter().enumerate() {
+        let (row, column) = tile_place(i, Item::ALL.len());
+        let at = grid.min + vec2(column * (tile_w + TILE_GAP), row as f32 * (TILE_H + TILE_GAP));
+        let rect = Rect::from_min_size(at, vec2(tile_w, TILE_H));
+        let response = ui.interact(rect, Id::new(("botao-lista", item)), Sense::click_and_drag()).on_hover_cursor(CursorIcon::PointingHand);
+        if response.drag_started() {
+            pending.grabbed = Some(item);
+        }
+        if response.clicked() {
+            pending.toggled = Some(item);
+        }
+        let on = layout.contains(item);
+        let lit = response.hovered() || held == Some(item);
+        let fill = match (on, lit) {
+            (_, true) => theme::GLASS_HOVER,
+            (true, false) => Color32::from_white_alpha(14),
+            (false, false) => Color32::TRANSPARENT,
+        };
+        ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+        if !on {
+            ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+        }
+        let color = if on { theme::TEXT } else { theme::TEXT_DIM };
+        paint_item_icon(ui.painter(), Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), vec2(16.0, 16.0)), item, color);
+        let name = kit::one_line(ui, item_label(item), theme::medium(13.0), color, tile_w - 62.0);
+        ui.painter().galley(pos2(rect.left() + 36.0, rect.center().y - name.size().y / 2.0), name, color);
+        let mark = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(13.0, 13.0));
+        icons::paint(ui.painter(), mark, if on { icons::CHECK } else { icons::PLUS }, if on { theme::TEXT } else { theme::TEXT_FAINT });
+    }
+    ui.add_space(14.0);
+}
+
+/// A barra e a lista: arrastar move, soltar fora tira, e o clique na lista
+/// liga ou desliga. `true` quando algo mudou.
+fn bar_editor(ui: &mut Ui, layout: &mut Layout, shell: Shell, signed_in: bool, width: f32) -> bool {
+    ui.label(egui::RichText::new(t().bar_hint).color(theme::TEXT_DIM).font(theme::regular(13.0)));
+    ui.add_space(8.0);
+    let held_id = Id::new("botao-arrastado");
+    let held: Option<Item> = ui.data(|d| d.get_temp(held_id)).flatten();
+    let classic = shell == Shell::Classic;
+    let (strip, _) = ui.allocate_exact_size(vec2(width, STRIP_H), Sense::hover());
+
+    // A vaga sai das colunas sem o botão na mão: assim ela não muda de lugar
+    // porque abriu espaço para si mesma.
+    let mut rest = layout.clone();
+    if let Some(item) = held {
+        rest.remove(item);
+    }
+    let pointer = ui.ctx().pointer_latest_pos();
+    let target = held.and(pointer).filter(|p| strip.expand(12.0).contains(*p)).map(|p| drop_target(&arrange(&rest, strip, classic), p));
+    let mut view = rest;
+    if let (Some(item), Some((zone, index))) = (held, target) {
+        view.place(item, zone, index);
+    }
+
+    let fits = super::bar::shown(layout, !classic, signed_in, ui.ctx().content_rect().width());
+    let hidden: Vec<Item> = Item::ALL.into_iter().filter(|i| layout.contains(*i) && !fits.contains(*i)).collect();
+    let mut pending = Pending::default();
+    bar_strip(ui, strip, &view, classic, held, target.map(|(zone, _)| zone), &hidden, &mut pending);
+    if !hidden.is_empty() {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(t().bar_faded).color(theme::TEXT_FAINT).font(theme::regular(12.0)));
+    }
+    ui.add_space(14.0);
+    bar_catalog(ui, layout, held, &mut pending, width);
+
+    if let Some(item) = pending.grabbed {
+        ui.data_mut(|d| d.insert_temp(held_id, Some(item)));
+    }
+    let mut changed = false;
+    if let Some(item) = pending.toggled {
+        if layout.contains(item) {
+            layout.remove(item);
+        } else {
+            let (zone, index) = layout.home(item, shell);
+            layout.place(item, zone, index);
+        }
+        changed = true;
+    }
+    if let Some(item) = pending.removed {
+        layout.remove(item);
+        changed = true;
+    }
+    let Some(item) = held else { return changed };
+
+    // O botão seguindo o mouse; fora da barra, avisa que soltar tira.
+    let leaving = target.is_none() && layout.contains(item);
+    if let Some(p) = pointer {
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("botao-voando")));
+        let label = if leaving { t().bar_drop_remove } else { item_label(item) };
+        let name = painter.layout_no_wrap(label.to_owned(), theme::medium(13.0), theme::TEXT);
+        let rect = Rect::from_center_size(p, vec2(name.size().x + 46.0, SLOT));
+        painter.rect_filled(rect, CornerRadius::same(8), if leaving { theme::accent() } else { theme::ACTIVE });
+        let icon = Rect::from_center_size(pos2(rect.left() + 19.0, rect.center().y), vec2(16.0, 16.0));
+        if leaving {
+            icons::paint(&painter, icon, icons::X, theme::TEXT);
+        } else {
+            paint_item_icon(&painter, icon, item, theme::TEXT);
+        }
+        painter.galley(pos2(rect.left() + 34.0, rect.center().y - name.size().y / 2.0), name, theme::TEXT);
+    }
+    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    if ui.input(|i| !i.pointer.any_down()) {
+        ui.data_mut(|d| d.insert_temp(held_id, None::<Item>));
+        // Fechar o diálogo com o botão na mão não conta como soltar.
+        if ui.input(|i| i.pointer.any_released()) {
+            if let Some((zone, index)) = target {
+                layout.place(item, zone, index);
+                changed = true;
+            } else if leaving {
+                layout.remove(item);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Uma linha do Discord: ícone, nome, a linha de baixo e o interruptor.
+/// `true` no clique.
+fn discord_row(ui: &mut Ui, row: Rect, id: &str, paint: impl Fn(&egui::Painter, Rect), title: &str, sub: &str, on: bool) -> bool {
+    let response = ui.interact(row, Id::new(("linha-discord", id)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    if response.hovered() {
+        ui.painter().rect_filled(row, CornerRadius::same(8), Color32::from_white_alpha(8));
+    }
+    paint(ui.painter(), Rect::from_center_size(pos2(row.left() + 22.0, row.center().y), vec2(20.0, 20.0)));
+    let x = row.left() + 44.0;
+    let text_w = row.width() - 44.0 - 62.0;
+    let name = kit::one_line(ui, title, theme::medium(13.5), theme::TEXT, text_w);
+    ui.painter().galley(pos2(x, row.center().y - name.size().y - 1.0), name, theme::TEXT);
+    let line = kit::one_line(ui, sub, theme::regular(12.0), theme::TEXT_FAINT, text_w);
+    ui.painter().galley(pos2(x, row.center().y + 2.0), line, theme::TEXT_FAINT);
+    paint_switch(ui, Rect::from_center_size(pos2(row.right() - 28.0, row.center().y), vec2(36.0, 20.0)), id, on);
+    response.clicked()
+}
+
+/// A música no perfil e o botão de divulgação. `true` quando algo mudou.
+fn discord_rows(ui: &mut Ui, discord: &mut crate::discord::Settings, link: Link, width: f32) -> bool {
+    const ROW_H: f32 = 48.0;
+    let (panel, _) = ui.allocate_exact_size(vec2(width, ROW_H * 2.0), Sense::hover());
+    ui.painter().rect_filled(panel, CornerRadius::same(10), PANEL);
+    let [top, bottom] = [0.0, ROW_H].map(|y| Rect::from_min_size(panel.min + vec2(0.0, y), vec2(width, ROW_H)));
+    let status = match (discord.on, link) {
+        (false, _) => t().discord_off,
+        (true, Link::Connected) => t().discord_showing,
+        (true, Link::Refused) => t().discord_refused,
+        (true, _) => t().discord_waiting,
+    };
+    let mut changed = false;
+    if discord_row(ui, top, "perfil", |p, r| icons::paint_discord(p, r, theme::TEXT), t().discord_show, status, discord.on) {
+        discord.on = !discord.on;
+        changed = true;
+    }
+    if discord_row(ui, bottom, "divulgar", |p, r| icons::paint(p, r, icons::DOWNLOAD, theme::TEXT), t().discord_promote, t().discord_promote_hint, discord.promote) {
+        discord.promote = !discord.promote;
+        changed = true;
+    }
+    changed
 }
 
 /// "Personalizar o player". Cada mudança vale na hora (a superfície editada
@@ -263,6 +730,7 @@ fn personalize(
         (icons::AUDIO_WAVEFORM, t().viz_title),
         (icons::MIC_VOCAL, t().look_section_lyrics),
         (icons::GLOBE, t().lyrics_translation),
+        (icons::PICTURE_IN_PICTURE_2, t().look_section_mini),
     ];
     if let Some(i) = segmented(ui, "secao", &tabs, section, width, 40.0) {
         section = i;
@@ -301,6 +769,10 @@ fn personalize(
         }
         if section == 3 {
             changed |= translation_section(ui, cx, &mut look.lyrics, width);
+            return;
+        }
+        if section == 4 {
+            changed |= mini_section(ui, &mut look.mini_layout, width);
             return;
         }
         let skin = look.skin_mut(surface);
@@ -631,7 +1103,7 @@ fn image_choice(ui: &mut Ui, cx: &mut Cx, skin: &mut Skin, url: &mut String, ima
     let (text, color) = if image.loading() {
         (t().loading_image.to_owned(), theme::TEXT_DIM)
     } else if let Some(error) = image.error() {
-        (t().image_load_failed(error), theme::ACCENT)
+        (t().image_load_failed(error), theme::accent())
     } else if image.ready() && !skin.image_url.is_empty() {
         let name = skin.image_url.rsplit(['/', '\\']).next().unwrap_or_default();
         (format!("{} {name}", t().image_applied), theme::TEXT_DIM)
@@ -780,6 +1252,14 @@ fn slider(ui: &mut Ui, label: &str, value: &mut f32, range: std::ops::RangeInclu
     *value != before
 }
 
+/// O interruptor deslizando, em `rect`.
+fn paint_switch(ui: &Ui, rect: Rect, id: &str, on: bool) {
+    let how = ui.ctx().animate_bool_with_time(Id::new(("interruptor", id)), on, 0.15);
+    ui.painter().rect_filled(rect, CornerRadius::same(10), theme::GLASS_HOVER.lerp_to_gamma(theme::TEXT, how));
+    let knob = pos2(rect.left() + 10.0 + 16.0 * how, rect.center().y);
+    ui.painter().circle_filled(knob, 7.5, Color32::WHITE.lerp_to_gamma(Color32::from_gray(20), how));
+}
+
 /// Uma linha baixa em `width`: o nome, a dica ao lado e o interruptor na
 /// ponta. `true` no clique.
 fn toggle_row(ui: &mut Ui, label: &str, hint: &str, on: bool, width: f32) -> bool {
@@ -789,12 +1269,7 @@ fn toggle_row(ui: &mut Ui, label: &str, hint: &str, on: bool, width: f32) -> boo
     ui.painter().galley(pos2(rect.left(), rect.center().y - title.size().y / 2.0), title, theme::TEXT_DIM);
     let sub = kit::one_line(ui, hint, theme::regular(12.0), theme::TEXT_FAINT, (width - title_w - 70.0).max(0.0));
     ui.painter().galley(pos2(rect.left() + title_w + 10.0, rect.center().y - sub.size().y / 2.0), sub, theme::TEXT_FAINT);
-    // O interruptor, deslizando.
-    let how = ui.ctx().animate_bool_with_time(Id::new(("interruptor", label)), on, 0.15);
-    let track = Rect::from_center_size(pos2(rect.right() - 19.0, rect.center().y), vec2(36.0, 20.0));
-    ui.painter().rect_filled(track, CornerRadius::same(10), theme::GLASS_HOVER.lerp_to_gamma(theme::TEXT, how));
-    let knob = pos2(track.left() + 10.0 + 16.0 * how, track.center().y);
-    ui.painter().circle_filled(knob, 7.5, Color32::WHITE.lerp_to_gamma(Color32::from_gray(20), how));
+    paint_switch(ui, Rect::from_center_size(pos2(rect.right() - 19.0, rect.center().y), vec2(36.0, 20.0)), label, on);
     response.on_hover_cursor(CursorIcon::PointingHand).clicked()
 }
 
@@ -1329,7 +1804,58 @@ fn lyrics_section(ui: &mut Ui, style: &mut crate::look::LyricsStyle, translate: 
             style.romaji = !style.romaji;
             changed = true;
         }
+        if toggle_row(ui, t().lyrics_hover_buttons, t().lyrics_hover_buttons_hint, style.hover_buttons, inner) {
+            style.hover_buttons = !style.hover_buttons;
+            changed = true;
+        }
     });
+    changed
+}
+
+/// A aba "Mini": a prévia com os botões arrastáveis, o tamanho e quais
+/// botões aparecem. `true` quando mudou.
+fn mini_section(ui: &mut Ui, layout: &mut crate::look::MiniLayout, width: f32) -> bool {
+    use crate::look::{MiniButton, MiniLayout};
+    let mut changed = false;
+    if let Some(order) = super::mini::preview(ui, layout, width) {
+        layout.set_visible_order(&order);
+        changed = true;
+    }
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(t().mini_drag_hint).color(theme::TEXT_FAINT).font(theme::regular(12.0)));
+    ui.add_space(12.0);
+    let percent: fn(f32) -> String = |v| format!("{:.0}%", v * 100.0);
+    card(ui, "", width, |ui, inner| {
+        row(ui, t().mini_size, |ui, w| {
+            let mut scale = layout.scale();
+            if slider_inline(ui, &mut scale, MiniLayout::SCALE, percent, w) {
+                // De 5 em 5%, para a janela não mudar de tamanho a cada pixel.
+                let snapped = (scale * 20.0).round() / 20.0;
+                if snapped != layout.scale() {
+                    layout.scale = snapped;
+                    changed = true;
+                }
+            }
+        });
+        if toggle_row(ui, t().mini_lyrics_divider, t().mini_lyrics_divider_hint, layout.lyrics_divider, inner) {
+            layout.lyrics_divider = !layout.lyrics_divider;
+            changed = true;
+        }
+    });
+    ui.add_space(12.0);
+    card(ui, t().mini_buttons_group, width, |ui, inner| {
+        for b in MiniButton::ALL.into_iter().filter(|b| b.can_hide()) {
+            if toggle_row(ui, b.label(), "", !layout.is_hidden(b), inner) {
+                layout.toggle_hidden(b);
+                changed = true;
+            }
+        }
+    });
+    ui.add_space(12.0);
+    if *layout != MiniLayout::default() && kit::pill(ui, Some(icons::REFRESH_CW), t().viz_reset, false).clicked() {
+        *layout = MiniLayout::default();
+        changed = true;
+    }
     changed
 }
 
@@ -1409,4 +1935,190 @@ fn translation_section(ui: &mut Ui, cx: &mut Cx, style: &mut crate::look::Lyrics
         row(ui, t().translation_color, |ui, _| changed |= color_row(ui, "cor-traducao", &mut style.translation_color));
     });
     changed
+}
+
+#[cfg(test)]
+mod bar_tests {
+    use super::{Shell, Tray, arrange, drop_target};
+    use crate::bar_layout::{Item, Layout, Zone};
+    use egui::{Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
+
+    fn strip() -> Rect {
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, super::STRIP_H))
+    }
+
+    fn tray(zone: Zone, left: f32, slots: &[(Item, f32)]) -> Tray {
+        let rect = Rect::from_min_size(pos2(left, 0.0), vec2(100.0, 60.0));
+        let slots = slots.iter().map(|(item, x)| (*item, Rect::from_min_size(pos2(*x, 20.0), vec2(30.0, 30.0)))).collect();
+        Tray { zone, rect, slots }
+    }
+
+    #[test]
+    fn a_ultima_linha_incompleta_fica_no_centro() {
+        // Linhas cheias começam na coluna 0.
+        assert_eq!(super::tile_place(4, 7), (1, 1.0));
+        // Sobra um: no meio das três colunas.
+        assert_eq!(super::tile_place(6, 7), (2, 1.0));
+        // Sobram dois: dividindo o vão do meio.
+        assert_eq!(super::tile_place(6, 8), (2, 0.5));
+        assert_eq!(super::tile_place(7, 8), (2, 1.5));
+    }
+
+    #[test]
+    fn soltar_escolhe_a_coluna_e_o_lugar() {
+        let trays = [tray(Zone::Left, 0.0, &[(Item::Next, 10.0), (Item::Menu, 50.0)]), tray(Zone::Right, 200.0, &[])];
+        assert_eq!(drop_target(&trays, pos2(5.0, 30.0)), (Zone::Left, 0));
+        assert_eq!(drop_target(&trays, pos2(40.0, 30.0)), (Zone::Left, 1));
+        assert_eq!(drop_target(&trays, pos2(99.0, 30.0)), (Zone::Left, 2));
+        // No vão entre as colunas vale a mais perto.
+        assert_eq!(drop_target(&trays, pos2(180.0, 30.0)), (Zone::Right, 0));
+    }
+
+    #[test]
+    fn a_barra_cheia_cabe_na_miniatura() {
+        let mut full = Layout { left: vec![], center: vec![], right: vec![] };
+        for item in Item::ALL {
+            full.right.push(item);
+        }
+        for classic in [true, false] {
+            let trays = arrange(&full, strip(), classic);
+            for pair in trays.windows(2) {
+                assert!(pair[0].rect.right() <= pair[1].rect.left(), "colunas sobrepostas");
+            }
+            assert!(trays.iter().all(|t| strip().contains_rect(t.rect) && t.rect.width() >= super::TRAY_MIN));
+            for tray in &trays {
+                assert!(tray.slots.iter().all(|(_, r)| tray.rect.contains_rect(*r)), "botão fora da coluna");
+            }
+            assert_eq!(trays.iter().map(|t| t.slots.len()).sum::<usize>(), Item::ALL.len());
+        }
+    }
+
+    /// O editor numa tela sem janela, com um mouse de mentira.
+    struct Bench {
+        ctx: egui::Context,
+        layout: Layout,
+        time: f64,
+    }
+
+    impl Bench {
+        fn new(layout: Layout) -> Self {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(fastframe_fonts::FontSetup::default().system_fallbacks(false).definitions());
+            let mut bench = Self { ctx, layout, time: 0.0 };
+            bench.frame(Vec::new());
+            bench.frame(Vec::new());
+            bench
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 0.1;
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let layout = &mut self.layout;
+            let mut output = self.ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.set_width(600.0);
+                    super::bar_editor(ui, layout, Shell::Classic, true, 600.0);
+                });
+            });
+            // Sem GPU, as texturas não sobem para lugar nenhum.
+            output.textures_delta.clear();
+        }
+
+        fn center(&self, id: impl std::hash::Hash + std::fmt::Debug) -> Pos2 {
+            self.ctx.read_response(Id::new(id)).expect("botão na tela").rect.center()
+        }
+
+        fn at(&mut self, p: Pos2) {
+            self.frame(vec![Event::PointerMoved(p)]);
+        }
+
+        fn button(&mut self, p: Pos2, pressed: bool) {
+            self.frame(vec![Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }]);
+        }
+
+        fn drag(&mut self, from: Pos2, to: Pos2) {
+            self.at(from);
+            self.button(from, true);
+            self.at(from + vec2(12.0, 0.0));
+            self.at(to);
+            self.at(to);
+            self.button(to, false);
+            self.frame(Vec::new());
+        }
+    }
+
+    #[test]
+    fn arrastar_para_outra_coluna_abre_a_vaga_e_move() {
+        let mut bench = Bench::new(Layout::classic());
+        let from = bench.center(("botao-barra", Item::Next));
+        let to = bench.center(("botao-barra", Item::Repeat));
+        bench.drag(from, to - vec2(10.0, 0.0));
+        assert!(!bench.layout.left.contains(&Item::Next));
+        assert_eq!(bench.layout.right, [Item::Volume, Item::Next, Item::Repeat, Item::Shuffle, Item::Expand]);
+    }
+
+    #[test]
+    fn arrastar_dentro_da_coluna_muda_a_ordem() {
+        let mut bench = Bench::new(Layout::classic());
+        let from = bench.center(("botao-barra", Item::Previous));
+        let to = bench.center(("botao-barra", Item::Next));
+        bench.drag(from, to);
+        assert_eq!(bench.layout.left, [Item::PlayPause, Item::Next, Item::Previous, Item::Time]);
+    }
+
+    #[test]
+    fn soltar_fora_da_barra_tira() {
+        let mut bench = Bench::new(Layout::classic());
+        let from = bench.center(("botao-barra", Item::Menu));
+        bench.drag(from, pos2(900.0, 700.0));
+        assert!(!bench.layout.contains(Item::Menu));
+    }
+
+    #[test]
+    fn da_lista_o_clique_alterna_e_o_arrasto_escolhe_o_lugar() {
+        let mut bench = Bench::new(Layout::classic());
+        let like = bench.center(("botao-lista", Item::Like));
+        bench.at(like);
+        bench.button(like, true);
+        bench.button(like, false);
+        bench.frame(Vec::new());
+        assert!(!bench.layout.contains(Item::Like));
+        bench.at(like);
+        bench.button(like, true);
+        bench.button(like, false);
+        bench.frame(Vec::new());
+        assert_eq!(bench.layout, Layout::classic());
+
+        let from = bench.center(("botao-lista", Item::Discord));
+        let to = bench.center(("botao-barra", Item::Previous));
+        bench.drag(from, to - vec2(10.0, 0.0));
+        assert_eq!(bench.layout.left[0], Item::Discord);
+    }
+
+    #[test]
+    fn o_x_tira_o_botao() {
+        let mut bench = Bench::new(Layout::classic());
+        let slot = bench.center(("botao-barra", Item::Menu));
+        bench.at(slot);
+        let corner = bench.center(("tirar-botao", Item::Menu));
+        bench.at(corner);
+        bench.button(corner, true);
+        bench.button(corner, false);
+        bench.frame(Vec::new());
+        assert!(!bench.layout.contains(Item::Menu));
+    }
+
+    #[test]
+    fn sobrar_um_botao_na_mao_nao_muda_nada() {
+        let mut bench = Bench::new(Layout::classic());
+        bench.ctx.data_mut(|d| d.insert_temp(Id::new("botao-arrastado"), Some(Item::Menu)));
+        bench.frame(Vec::new());
+        bench.frame(Vec::new());
+        assert_eq!(bench.layout, Layout::classic());
+    }
 }

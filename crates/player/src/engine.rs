@@ -106,6 +106,8 @@ pub struct Config {
     pub cache_file: PathBuf,
     pub client: Arc<Client>,
     pub volume: f32,
+    /// As músicas baixadas: as que estão aqui tocam do disco, sem internet.
+    pub offline: Option<Arc<crate::Offline>>,
 }
 
 pub(crate) enum Msg {
@@ -240,6 +242,7 @@ struct Engine {
     http: Arc<reqwest::blocking::Client>,
     bin_dir: PathBuf,
     cache_file: PathBuf,
+    offline: Option<Arc<crate::Offline>>,
     /// A conta para o yt-dlp, e onde o arquivo de cookies dele é escrito.
     account: Option<ytdlp::Account>,
     cookie_dir: PathBuf,
@@ -324,6 +327,7 @@ impl Engine {
             account: None,
             cookie_dir,
             cache_file: config.cache_file,
+            offline: config.offline,
             ytdlp,
             installing: false,
             tried_update: false,
@@ -961,6 +965,9 @@ impl Engine {
         {
             return;
         }
+        if let Some(path) = self.offline.as_ref().and_then(|o| o.path_of(video_id)) {
+            return self.spawn_read(video_id, path);
+        }
         match self.resolved.get(video_id).filter(|r| r.fresh(now())).cloned() {
             Some(r) => self.spawn_fetch(r),
             None => self.resolve(video_id),
@@ -1059,6 +1066,18 @@ impl Engine {
         answering("download", self.tx.clone(), Some(failed), move || {
             let result = fetch(&http, &r);
             Some(Msg::Fetched { video_id: r.video_id, result })
+        });
+    }
+
+    /// A música baixada: o arquivo inteiro do disco, como se tivesse vindo
+    /// da rede (~10 ms, sem yt-dlp).
+    fn spawn_read(&mut self, video_id: &str, path: PathBuf) {
+        self.fetching.insert(video_id.to_owned());
+        let video_id = video_id.to_owned();
+        let failed = Msg::Fetched { video_id: video_id.clone(), result: Err(FetchError::Other("erro interno ao ler a música baixada".into())) };
+        answering("ler-baixada", self.tx.clone(), Some(failed), move || {
+            let result = std::fs::read(&path).map(Audio::from).map_err(|e| FetchError::Other(e.to_string()));
+            Some(Msg::Fetched { video_id, result })
         });
     }
 
@@ -1445,6 +1464,7 @@ mod tests {
             cache_file: dir.join("enderecos.json"),
             client: Arc::new(Client::new("pt", "BR").unwrap()),
             volume: 1.0,
+            offline: None,
         };
         let snapshot = Arc::new(Mutex::new(Snapshot::default()));
         Engine::new(config, rx, tx, snapshot, Arc::new(AtomicU64::new(0)), Arc::new(Shared::default()), Arc::new(|| {}))

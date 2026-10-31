@@ -8,6 +8,9 @@
 //! - **Linux:** o Secret Service (GNOME Keyring, KWallet). Sem ele (um
 //!   ambiente mínimo), o arquivo `conta.bin` com permissão só do dono, numa
 //!   pasta também só do dono, como os navegadores fazem nesse caso.
+//!
+//! Cada conta tem o seu `path` (`Paths::session_of`), que no chaveiro vira o
+//! nome da entrada.
 
 use std::path::Path;
 
@@ -96,15 +99,20 @@ fn crypt(data: &[u8], encrypt: bool) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// A entrada do chaveiro do sistema.
+/// A entrada do chaveiro do sistema: a de sempre para `conta.bin`, e uma por
+/// conta para as outras.
 #[cfg(not(windows))]
-fn entry() -> Option<keyring::Entry> {
-    keyring::Entry::new("MusicFast", "sessao-google").map_err(|e| log::warn!("chaveiro: {e}")).ok()
+fn entry(path: &Path) -> Option<keyring::Entry> {
+    let name = match path.file_stem().and_then(|s| s.to_str()) {
+        Some(stem) if stem != "conta" => format!("sessao-google-{stem}"),
+        _ => "sessao-google".to_owned(),
+    };
+    keyring::Entry::new("MusicFast", &name).map_err(|e| log::warn!("chaveiro: {e}")).ok()
 }
 
 #[cfg(not(windows))]
 pub fn save(path: &Path, cookie: &str) {
-    match entry().map(|e| e.set_password(cookie)) {
+    match entry(path).map(|e| e.set_password(cookie)) {
         Some(Ok(())) => {
             // Uma cópia em arquivo de antes do chaveiro não fica para trás.
             remove(path);
@@ -129,7 +137,7 @@ pub fn save(path: &Path, cookie: &str) {
 
 #[cfg(not(windows))]
 pub fn load(path: &Path) -> Option<String> {
-    if let Some(entry) = entry() {
+    if let Some(entry) = entry(path) {
         match entry.get_password() {
             Ok(cookie) => return Some(cookie),
             Err(keyring::Error::NoEntry) => {}
@@ -141,11 +149,32 @@ pub fn load(path: &Path) -> Option<String> {
 
 #[cfg(not(windows))]
 pub fn clear(path: &Path) {
-    if let Some(entry) = entry() {
+    if let Some(entry) = entry(path) {
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
             Err(error) => log::warn!("chaveiro: {error}"),
         }
     }
     remove(path);
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cada_conta_guarda_a_propria_sessao_cifrada() {
+        let dir = std::env::temp_dir().join(format!("musicfast-cofre-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.bin"), dir.join("b.bin"));
+        save(&a, "SAPISID=conta-a");
+        save(&b, "SAPISID=conta-b");
+        assert_eq!(load(&a).as_deref(), Some("SAPISID=conta-a"));
+        assert_eq!(load(&b).as_deref(), Some("SAPISID=conta-b"));
+        assert!(!std::fs::read(&a).unwrap().windows(7).any(|w| w == b"SAPISID"));
+        clear(&a);
+        assert_eq!(load(&a), None);
+        assert_eq!(load(&b).as_deref(), Some("SAPISID=conta-b"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

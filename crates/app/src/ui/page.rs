@@ -6,14 +6,16 @@
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use musicfast_i18n::t;
 use musicfast_player::Command;
+use musicfast_player::offline::{State as Download, Step};
 use musicfast_ytm::{Card, Header, Item, Kind, LikeStatus, Page, Shelf, ShelfStyle, Track};
 
 use super::icons;
 use super::kit;
 use super::theme;
+use super::panels::Columns;
 use super::{Action, Cx, PageState, View, play_command};
 
-const GUTTER: f32 = 32.0;
+pub(super) const GUTTER: f32 = 32.0;
 /// As medidas do site: a linha de música de uma playlist tem 68 de altura
 /// (76 de uma para a outra); a do "Escolha a dedo", 48 (64).
 const ROW: f32 = 68.0;
@@ -24,7 +26,12 @@ const PICK_GAP: f32 = 16.0;
 /// (a de verdade estica um pouco para as colunas inteiras encherem a tela).
 const PICKS_ROWS: usize = 4;
 const PICKS_COLUMN: f32 = 312.0;
-const TILE: f32 = 176.0;
+/// Quanto a linha acesa da página "Baixadas" passa da coluna, de cada lado: a
+/// capa fica alinhada com o título da página.
+const ROW_BLEED: f32 = 12.0;
+pub(super) const TILE: f32 = 176.0;
+/// A margem de dentro do cartão dos painéis, que acende sob o mouse.
+const TILE_PAD: f32 = 12.0;
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, view: &View, state: &PageState) {
     let Some(page) = state.page.clone() else {
@@ -90,6 +97,10 @@ fn more_sentinel(ui: &mut Ui, cx: &mut Cx, loading: bool, action: Action) {
 }
 
 fn header_block(ui: &mut Ui, cx: &mut Cx, header: &Header, page: &Page) {
+    if theme::panels() {
+        super::panels::header(ui, cx, header, page);
+        return;
+    }
     let artist = header.kind == Kind::Artist;
     let side = if artist { 180.0 } else { 220.0 };
     ui.horizontal_top(|ui| {
@@ -199,9 +210,12 @@ fn shelf_title(ui: &mut Ui, cx: &mut Cx, shelf: &Shelf, arrows: Option<Id>, play
     if shelf.title.is_empty() {
         return;
     }
+    // Nos painéis, o título é menor e o "Mais" vira um link.
+    let panels = theme::panels();
+    let title_font = if panels { theme::bold(24.0) } else { theme::bold(34.0) };
     // Os botões primeiro, da direita para a esquerda; o título fica com o
     // que sobra, cortado com reticências, em vez de passar por baixo deles.
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 41.0), Sense::hover());
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), if panels { 36.0 } else { 41.0 }), Sense::hover());
     let mut buttons = ui.new_child(UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
     {
         let ui = &mut buttons;
@@ -226,7 +240,8 @@ fn shelf_title(ui: &mut Ui, cx: &mut Cx, shelf: &Shelf, arrows: Option<Id>, play
                 if play_all {
                     ui.add_space(8.0);
                 }
-                if outline_pill(ui, t().more) {
+                let open = if panels { show_all_link(ui) } else { outline_pill(ui, t().more) };
+                if open {
                     cx.act(Action::Open(View::browse(&more.id, more.params.as_deref())));
                 }
             }
@@ -235,7 +250,7 @@ fn shelf_title(ui: &mut Ui, cx: &mut Cx, shelf: &Shelf, arrows: Option<Id>, play
     let used = buttons.min_rect().width();
     let gap = if used > 0.0 { 24.0 } else { 0.0 };
     let width = (row.width() - used - gap).max(40.0);
-    let title = kit::one_line(ui, &shelf.title, theme::bold(34.0), theme::TEXT, width);
+    let title = kit::one_line(ui, &shelf.title, title_font, theme::TEXT, width);
     let resp = ui.interact(Rect::from_min_size(row.min, vec2(title.size().x, row.height())), Id::new(("titulo-prateleira", &shelf.title)), Sense::hover());
     if title.size().x >= width - 1.0 {
         // Cortado: o nome inteiro na dica.
@@ -243,6 +258,19 @@ fn shelf_title(ui: &mut Ui, cx: &mut Cx, shelf: &Shelf, arrows: Option<Id>, play
     }
     ui.painter().galley(pos2(row.left(), row.center().y - title.size().y / 2.0), title, theme::TEXT);
     ui.add_space(16.0);
+}
+
+/// O "Mostrar tudo" dos painéis.
+fn show_all_link(ui: &mut Ui) -> bool {
+    let galley = ui.painter().layout_no_wrap(t().show_all.to_owned(), theme::medium(14.0), theme::TEXT_DIM);
+    let (rect, response) = ui.allocate_exact_size(galley.size() + vec2(8.0, 12.0), Sense::click());
+    let color = if response.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+    let at = rect.center() - galley.size() / 2.0;
+    if response.hovered() {
+        ui.painter().hline(at.x..=at.x + galley.size().x, at.y + galley.size().y, egui::Stroke::new(1.0, color));
+    }
+    ui.painter().galley_with_override_text_color(at, galley, color);
+    response.on_hover_cursor(CursorIcon::PointingHand).clicked()
 }
 
 /// O contorno branco a 20% dos botões do título no site.
@@ -411,17 +439,37 @@ fn shelf_block(ui: &mut Ui, cx: &mut Cx, page: &Page, view: &View, si: usize, sh
                     Command::PlayRadio { seed: track.clone() }
                 }
             };
+            let panels = theme::panels();
+            // A tabela dos painéis: álbum sem capa repetida; playlist com a
+            // coluna do álbum; busca e início, só capa e título.
+            let columns = Columns { numbered: list_page, cover: !numbered, album: list_page && !numbered };
+            let mut items = shelf.items.as_slice();
+            if panels && matches!(view, View::Search { .. }) && si == 0
+                && let Some(Item::Card(card)) = items.first()
+            {
+                super::panels::top_result(ui, cx, card);
+                ui.add_space(12.0);
+                items = &items[1..];
+            }
+            if panels && list_page {
+                super::panels::table_head(ui, columns);
+            }
             // No site as linhas ficam a 8 uma da outra.
             ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.y = ROW_GAP;
+                ui.spacing_mut().item_spacing.y = if panels { 0.0 } else { ROW_GAP };
                 let mut n = 0;
-                for item in &shelf.items {
+                for item in items {
                     match item {
                         Item::Track(track) => {
                             let index = n;
                             n += 1;
-                            let number = numbered.then_some(index + 1);
-                            if track_row(ui, cx, track, number, false, Id::new(("linha", si, index))) {
+                            let id = Id::new(("linha", si, index));
+                            let clicked = if panels {
+                                super::panels::track_line(ui, cx, track, index + 1, columns, id)
+                            } else {
+                                track_row(ui, cx, track, numbered.then_some(index + 1), false, id)
+                            };
+                            if clicked {
                                 cx.act(Action::Cmd(play(track, index)));
                             }
                         }
@@ -456,40 +504,79 @@ fn shelf_tracks(shelf: &Shelf) -> Vec<Track> {
 /// (quem chama monta o comando de tocar só então). Fora da tela, só reserva
 /// o espaço.
 pub fn track_row(ui: &mut Ui, cx: &mut Cx, track: &Track, number: Option<usize>, compact: bool, id: Id) -> bool {
+    track_row_with(ui, cx, track, number, compact, id, false)
+}
+
+/// `track_row`, e com `deletable` a lixeira de apagar o download e a linha
+/// que acende aos poucos sob o mouse (a página "Baixadas").
+pub(super) fn track_row_with(ui: &mut Ui, cx: &mut Cx, track: &Track, number: Option<usize>, compact: bool, id: Id, deletable: bool) -> bool {
     let width = ui.available_width();
-    let (height, pad, radius) = if compact { (PICK_ROW, 8.0, 4) } else { (ROW, 16.0, 2) };
+    let (height, pad, radius) = match (compact, deletable) {
+        (true, _) => (PICK_ROW, 8.0, 4),
+        (false, true) => (ROW, 0.0, 6),
+        (false, false) => (ROW, 16.0, 2),
+    };
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-    if !ui.is_rect_visible(rect) {
+    let lit_rect = if deletable { rect.expand2(vec2(ROW_BLEED, 0.0)) } else { rect };
+    let lit_row = deletable || theme::panels();
+    if !ui.is_rect_visible(lit_rect) {
         return false;
     }
-    let response = ui.interact(rect, id, Sense::click());
+    // A música baixada se arrasta para fora do app pela linha inteira
+    // (soltar no Premiere importa, no Explorer copia, num chat envia).
+    let download = cx.download(&track.video_id);
+    let sense = if matches!(download, Download::Done(_)) { Sense::click_and_drag() } else { Sense::click() };
+    let response = ui.interact(lit_rect, id, sense);
+    if response.drag_started()
+        && let Download::Done(path) = &download
+    {
+        cx.act(Action::DragOut(path.clone()));
+    }
     let menu_open = response.context_menu_opened();
     let current = cx.current.as_deref() == Some(track.video_id.as_str());
     // O site não pinta a linha sob o mouse: escurece a capa e mostra os botões.
-    let hovered = response.hovered() || menu_open || ui.rect_contains_pointer(rect);
+    // Nas baixadas a linha acende, e tudo isso entra aos poucos (`glow`).
+    let hovered = response.hovered() || menu_open || ui.rect_contains_pointer(lit_rect);
+    let glow = if lit_row { ui.ctx().animate_bool_with_time(id.with("luz"), hovered, 0.14) } else { f32::from(u8::from(hovered)) };
     if response.hovered() {
         cx.act(Action::Warm(track.video_id.clone()));
     }
+    if compact && hovered && theme::panels()
+        && let Some(tint) = cx.covers.color(&track.thumbs)
+    {
+        super::panels::offer_tint(ui, tint);
+    }
     let p = ui.painter().clone();
+    if lit_row {
+        if current {
+            p.rect_filled(lit_rect, CornerRadius::same(theme::RADIUS), theme::accent().gamma_multiply(0.1));
+        }
+        let fill = if response.is_pointer_button_down_on() { theme::GLASS_ACTIVE } else { theme::GLASS_HOVER };
+        p.rect_filled(lit_rect, CornerRadius::same(theme::RADIUS), fill.gamma_multiply(glow));
+    }
     let lead = Rect::from_min_size(pos2(rect.left() + pad, rect.center().y - 24.0), vec2(48.0, 48.0));
+    let lit = theme::TEXT.gamma_multiply(glow);
     match &number {
         Some(n) => {
             if current {
                 equalizer(&p, lead.shrink(14.0), cx.playing);
             } else if hovered {
-                icons::paint_filled(&p, lead.shrink(12.0), icons::PLAY, theme::TEXT);
+                icons::paint_filled(&p, lead.shrink(12.0), icons::PLAY, lit);
             } else {
                 p.text(lead.center(), Align2::CENTER_CENTER, n.to_string(), theme::regular(16.0), theme::TEXT_SUB);
             }
         }
         None => {
-            cx.covers.paint(ui, lead, &track.thumbs, radius);
-            if current || hovered {
-                p.rect_filled(lead, CornerRadius::same(radius), Color32::from_black_alpha(150));
+            // A capa cresce um pouco com a luz da linha.
+            let art = if deletable { lead.expand(2.0 * glow) } else { lead };
+            cx.covers.paint(ui, art, &track.thumbs, radius);
+            let shade = if current { 1.0 } else { glow };
+            if shade > 0.0 {
+                p.rect_filled(art, CornerRadius::same(radius), Color32::from_black_alpha((150.0 * shade) as u8));
                 if current {
                     equalizer(&p, lead.shrink(14.0), cx.playing);
                 } else {
-                    icons::paint_filled(&p, lead.shrink(12.0), icons::PLAY, theme::TEXT);
+                    icons::paint_filled(&p, lead.shrink(12.0), icons::PLAY, lit);
                 }
             }
         }
@@ -499,13 +586,15 @@ pub fn track_row(ui: &mut Ui, cx: &mut Cx, track: &Track, number: Option<usize>,
 
     // Os botões do mouse: curtir e não curtir só com conta.
     const BUTTON: f32 = 36.0;
-    let buttons = if cx.me.signed_in { 3.0 } else { 1.0 };
+    // O de baixar fica à vista enquanto baixa (e se falhou); baixada, some.
+    let downloaded = matches!(download, Download::Done(_));
+    let download_shown = matches!(download, Download::Working(_) | Download::Failed(_));
+    let buttons = if cx.me.signed_in { 3.0 } else { 1.0 } + if deletable { 1.0 } else { 0.0 } + if downloaded { 0.0 } else { 1.0 };
     let reserve = if hovered {
         buttons * (BUTTON + 4.0)
-    } else if compact {
-        0.0
     } else {
-        64.0
+        let duration = if compact { 0.0 } else { 64.0 };
+        duration + if download_shown { BUTTON + 4.0 } else { 0.0 }
     };
     let text_w = (right - reserve - x - 8.0).max(40.0);
     let (title_y, sub_y) = if compact { (rect.top() + 3.0, rect.top() + 25.0) } else { (rect.top() + 11.0, rect.top() + 38.0) };
@@ -556,7 +645,7 @@ pub fn track_row(ui: &mut Ui, cx: &mut Cx, track: &Track, number: Option<usize>,
         let mut bx = right - BUTTON;
         let menu_rect = Rect::from_min_size(pos2(bx, rect.center().y - BUTTON / 2.0), vec2(BUTTON, BUTTON));
         let menu = ui.interact(menu_rect, id.with("menu"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-        kit::paint_icon_button(ui, menu_rect, &menu, icons::ELLIPSIS, theme::TEXT);
+        kit::paint_icon_button(ui, menu_rect, &menu, icons::ELLIPSIS, lit);
         egui::Popup::menu(&menu).show(|ui| track_menu(ui, cx, track));
         if cx.me.signed_in {
             let status = cx.me.like(&track.video_id);
@@ -564,9 +653,9 @@ pub fn track_row(ui: &mut Ui, cx: &mut Cx, track: &Track, number: Option<usize>,
                 bx -= BUTTON + 4.0;
                 let r = Rect::from_min_size(pos2(bx, rect.center().y - BUTTON / 2.0), vec2(BUTTON, BUTTON));
                 let b = ui.interact(r, id.with(key), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-                kit::paint_icon_button(ui, r, &b, icon, theme::TEXT);
+                kit::paint_icon_button(ui, r, &b, icon, lit);
                 if status == mine {
-                    icons::paint_filled(ui.painter(), r.shrink(r.width() * 0.25), icon, theme::TEXT);
+                    icons::paint_filled(ui.painter(), r.shrink(r.width() * 0.25), icon, lit);
                 }
                 if b.clicked() {
                     let next = if status == mine { LikeStatus::Indifferent } else { mine };
@@ -574,23 +663,107 @@ pub fn track_row(ui: &mut Ui, cx: &mut Cx, track: &Track, number: Option<usize>,
                 }
             }
         }
-    } else if !compact && let Some(d) = track.duration_secs {
-        p.text(pos2(right, rect.center().y), Align2::RIGHT_CENTER, kit::time(d as f64), theme::regular(16.0), theme::TEXT_SUB);
+        if deletable {
+            bx -= BUTTON + 4.0;
+            let r = Rect::from_min_size(pos2(bx, rect.center().y - BUTTON / 2.0), vec2(BUTTON, BUTTON));
+            let b = ui.interact(r, id.with("apagar"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            kit::paint_icon_button(ui, r, &b, icons::TRASH_2, lit);
+            if b.on_hover_text(t().delete_download).clicked() {
+                cx.act(Action::DeleteDownload(track.video_id.clone()));
+            }
+        }
+        if !downloaded {
+            bx -= BUTTON + 4.0;
+            let r = Rect::from_min_size(pos2(bx, rect.center().y - BUTTON / 2.0), vec2(BUTTON, BUTTON));
+            download_button(ui, cx, r, id.with("baixar"), track, &download);
+        }
+    } else {
+        if !compact && let Some(d) = track.duration_secs {
+            // Volta aos poucos quando a luz da linha se apaga.
+            let color = theme::TEXT_SUB.gamma_multiply(1.0 - glow);
+            p.text(pos2(right, rect.center().y), Align2::RIGHT_CENTER, kit::time(d as f64), theme::regular(16.0), color);
+        }
+        if download_shown {
+            let x = right - if compact { 0.0 } else { 64.0 } - BUTTON;
+            let r = Rect::from_min_size(pos2(x, rect.center().y - BUTTON / 2.0), vec2(BUTTON, BUTTON));
+            download_button(ui, cx, r, id.with("baixar"), track, &download);
+        }
     }
     let clicked = response.clicked();
     response.context_menu(|ui| track_menu(ui, cx, track));
     clicked
 }
 
+/// O botão de baixar: a seta, e o anel de progresso enquanto baixa. A
+/// música baixada não tem botão: a linha dela é que se arrasta.
+pub fn download_button(ui: &mut Ui, cx: &mut Cx, rect: Rect, id: Id, track: &Track, state: &Download) {
+    let p = ui.painter().clone();
+    match state {
+        Download::None | Download::Failed(_) => {
+            let response = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            let failed = matches!(state, Download::Failed(_));
+            kit::paint_icon_button(ui, rect, &response, icons::DOWNLOAD, if failed { theme::accent() } else { theme::TEXT });
+            let tip = match state {
+                Download::Failed(error) => t().download_failed_retry(error),
+                _ => t().download.to_owned(),
+            };
+            if response.on_hover_text(tip).clicked() {
+                cx.act(Action::Download(track.clone()));
+            }
+        }
+        Download::Working(step) => {
+            let response = ui.interact(rect, id, Sense::hover());
+            let fraction = match step {
+                Step::Downloading(f) => *f,
+                Step::Saving => Some(1.0),
+                Step::Queued | Step::Resolving => None,
+            };
+            progress_ring(&p, rect.center(), rect.width() * 0.3, fraction);
+            let tip = match step {
+                Step::Queued => t().download_queued.to_owned(),
+                Step::Resolving => t().download_preparing.to_owned(),
+                Step::Downloading(Some(f)) => t().downloading_percent(*f),
+                Step::Downloading(None) => t().downloading.to_owned(),
+                Step::Saving => t().download_saving.to_owned(),
+            };
+            response.on_hover_text(tip);
+        }
+        Download::Done(_) => {}
+    }
+}
+
+/// O anel do download: a fração baixada, ou um arco que gira enquanto o
+/// tamanho não se sabe.
+fn progress_ring(p: &egui::Painter, center: egui::Pos2, radius: f32, fraction: Option<f32>) {
+    use std::f32::consts::TAU;
+    p.circle_stroke(center, radius, egui::Stroke::new(2.5, Color32::from_white_alpha(40)));
+    let (start, sweep) = match fraction {
+        Some(f) => (-TAU / 4.0, TAU * f.clamp(0.02, 1.0)),
+        None => {
+            let time = p.ctx().input(|i| i.time) as f32;
+            p.ctx().request_repaint_after(std::time::Duration::from_millis(30));
+            (time * 5.0, TAU * 0.28)
+        }
+    };
+    let steps = ((sweep / TAU) * 48.0).ceil().max(2.0) as usize;
+    let points: Vec<egui::Pos2> = (0..=steps)
+        .map(|i| {
+            let a = start + sweep * i as f32 / steps as f32;
+            center + vec2(a.cos(), a.sin()) * radius
+        })
+        .collect();
+    p.add(egui::Shape::line(points, egui::Stroke::new(2.5, theme::TEXT)));
+}
+
 /// As barrinhas da música que toca (paradas quando pausada).
-fn equalizer(p: &egui::Painter, rect: Rect, moving: bool) {
+pub(super) fn equalizer(p: &egui::Painter, rect: Rect, moving: bool) {
     let t = if moving { p.ctx().input(|i| i.time) } else { 0.0 };
     let w = rect.width() / 5.0;
     for (i, phase) in [0.0f64, 1.7, 0.9].iter().enumerate() {
         let level = if moving { 0.35 + 0.65 * ((t * 7.0 + phase).sin() * 0.5 + 0.5) } else { 0.4 } as f32;
         let h = rect.height() * level;
         let x = rect.left() + w * (i as f32 * 2.0);
-        p.rect_filled(Rect::from_min_max(pos2(x, rect.bottom() - h), pos2(x + w, rect.bottom())), CornerRadius::same(1), theme::ACCENT);
+        p.rect_filled(Rect::from_min_max(pos2(x, rect.bottom() - h), pos2(x + w, rect.bottom())), CornerRadius::same(1), theme::accent());
     }
     if moving {
         p.ctx().request_repaint_after(std::time::Duration::from_millis(60));
@@ -624,6 +797,22 @@ pub fn track_menu(ui: &mut Ui, cx: &mut Cx, track: &Track) {
     if menu_item(ui, icons::RADIO, t().start_radio) {
         cx.act(Action::Cmd(Command::PlayRadio { seed: track.clone() }));
     }
+    match cx.download(&track.video_id) {
+        Download::None | Download::Failed(_) => {
+            if menu_item(ui, icons::DOWNLOAD, t().download) {
+                cx.act(Action::Download(track.clone()));
+            }
+        }
+        Download::Working(_) => {}
+        Download::Done(path) => {
+            if menu_item(ui, icons::FOLDER, t().show_in_folder) {
+                cx.act(Action::Reveal(path));
+            }
+            if menu_item(ui, icons::TRASH_2, t().delete_download) {
+                cx.act(Action::DeleteDownload(track.video_id.clone()));
+            }
+        }
+    }
     if let Some(id) = track.album.as_ref().and_then(|a| a.id.as_ref())
         && menu_item(ui, icons::DISC_3, t().go_to_album)
     {
@@ -636,7 +825,7 @@ pub fn track_menu(ui: &mut Ui, cx: &mut Cx, track: &Track) {
     }
 }
 
-fn menu_item(ui: &mut Ui, icon: icons::Icon, text: &str) -> bool {
+pub(super) fn menu_item(ui: &mut Ui, icon: icons::Icon, text: &str) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(MENU_W, 34.0), Sense::click());
     if response.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::same(6), theme::HOVER);
@@ -677,7 +866,7 @@ fn card_row(ui: &mut Ui, cx: &mut Cx, card: &Card) {
     }
 }
 
-fn open_card(cx: &mut Cx, card: &Card) {
+pub(super) fn open_card(cx: &mut Cx, card: &Card) {
     if !card.browse_id.is_empty() {
         cx.act(Action::Open(View::browse(&card.browse_id, card.params.as_deref())));
     } else if let Some(play) = &card.play {
@@ -688,7 +877,8 @@ fn open_card(cx: &mut Cx, card: &Card) {
 /// As capas em grade que quebra linha (a biblioteca).
 fn grid(ui: &mut Ui, cx: &mut Cx, si: usize, shelf: &Shelf) {
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(18.0, 18.0);
+        let gap = if theme::panels() { 0.0 } else { 18.0 };
+        ui.spacing_mut().item_spacing = vec2(gap, gap);
         for (i, item) in shelf.items.iter().enumerate() {
             tile(ui, cx, item, Id::new(("grade", si, i)));
         }
@@ -729,14 +919,31 @@ fn mood_grid(ui: &mut Ui, cx: &mut Cx, shelf: &Shelf) {
 }
 
 fn carousel(ui: &mut Ui, cx: &mut Cx, si: usize, shelf: &Shelf, id: Id) {
-    scroller(ui, id, TILE + 18.0, |ui| {
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 18.0;
-            for (i, item) in shelf.items.iter().enumerate() {
-                tile(ui, cx, item, Id::new(("tile", si, i)));
-            }
+    let panels = theme::panels();
+    let (gap, pitch) = if panels { (0.0, TILE + 2.0 * TILE_PAD) } else { (18.0, TILE + 18.0) };
+    let mut body = |ui: &mut Ui| {
+        scroller(ui, id, pitch, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (i, item) in shelf.items.iter().enumerate() {
+                    tile(ui, cx, item, Id::new(("tile", si, i)));
+                }
+            });
         });
-    });
+    };
+    if panels {
+        // O cartão tem margem por dentro: a fila sai dela para a capa ficar
+        // alinhada com o título da prateleira.
+        // Num filho à parte: alargar a própria `ui` empurraria tudo que vem
+        // depois para a esquerda.
+        let wider = ui.available_rect_before_wrap().expand2(vec2(TILE_PAD, 0.0));
+        let mut row = ui.new_child(UiBuilder::new().max_rect(wider));
+        body(&mut row);
+        let height = row.min_rect().height();
+        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    } else {
+        body(ui);
+    }
 }
 
 /// "Escolha a dedo": colunas de `PICKS_ROWS` músicas, tantas inteiras
@@ -776,13 +983,15 @@ fn tile(ui: &mut Ui, cx: &mut Cx, item: &Item, id: Id) {
         Item::Track(t) => (t.title.as_str(), t.artist_names(), &t.thumbs, false),
         Item::Card(c) => (c.title.as_str(), c.subtitle.clone(), &c.thumbs, c.kind == Kind::Artist),
     };
-    let (rect, _) = ui.allocate_exact_size(vec2(TILE, TILE + 56.0), Sense::hover());
+    let panels = theme::panels();
+    let (pad, text_h) = if panels { (TILE_PAD, 84.0) } else { (0.0, 56.0) };
+    let (rect, _) = ui.allocate_exact_size(vec2(TILE + 2.0 * pad, TILE + pad + text_h), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return;
     }
-    let art = Rect::from_min_size(rect.min, vec2(TILE, TILE));
-    let response = ui.interact(art, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-    cx.covers.paint(ui, art, thumbs, if round { (TILE / 2.0) as u8 } else { 6 });
+    let art = Rect::from_min_size(rect.min + vec2(pad, pad), vec2(TILE, TILE));
+    let hit_area = if panels { rect } else { art };
+    let response = ui.interact(hit_area, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
     let current = matches!(item, Item::Track(t) if cx.current.as_deref() == Some(t.video_id.as_str()));
     let playable = match item {
         Item::Track(_) => true,
@@ -796,29 +1005,48 @@ fn tile(ui: &mut Ui, cx: &mut Cx, item: &Item, id: Id) {
     // card piscava, e o clique caía na capa e abria o álbum em vez de tocar.
     let button = Rect::from_center_size(art.right_bottom() - vec2(30.0, 30.0), vec2(40.0, 40.0));
     let play = playable.then(|| ui.interact(button, id.with("tocar"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand));
-    let over = ui.rect_contains_pointer(art);
+    let over = ui.rect_contains_pointer(hit_area);
     // Aparecer e sumir em ~120 ms, em vez de piscar de um quadro para o outro.
     let shade = ui.ctx().animate_bool_with_time(id.with("hover"), over, 0.12);
-    if shade > 0.0 && !round {
+    if panels && shade > 0.0 {
+        // O cartão acende mais em cima, e o alto da página pega a cor da capa.
+        let top = theme::GLASS_HOVER.gamma_multiply(shade);
+        super::panels::rounded_gradient(ui.painter(), rect, 6.0, top, top.gamma_multiply(0.35), vec2(0.0, 1.0));
+        if over && let Some(tint) = cx.covers.color(thumbs) {
+            super::panels::offer_tint(ui, tint);
+        }
+    }
+    cx.covers.paint(ui, art, thumbs, if round { (TILE / 2.0) as u8 } else { 6 });
+    if !panels && shade > 0.0 && !round {
         ui.painter().rect_filled(art, CornerRadius::same(6), Color32::from_black_alpha((90.0 * shade) as u8));
     }
     let mut play_clicked = false;
     if let Some(play) = play {
         let shown = if current { 1.0 } else { shade };
         if shown > 0.0 {
-            let lit = ui.ctx().animate_bool_with_time(id.with("tocar-luz"), play.hovered(), 0.1);
-            let fill = Color32::from_black_alpha(200).lerp_to_gamma(Color32::WHITE, lit).gamma_multiply(shown);
-            let fg = Color32::WHITE.lerp_to_gamma(Color32::BLACK, lit).gamma_multiply(shown);
-            ui.painter().circle_filled(button.center(), 20.0, fill);
-            icons::paint_filled(ui.painter(), button.shrink(11.0), icons::PLAY, fg);
+            if panels {
+                // O botão verde sobe enquanto aparece.
+                let at = button.translate(vec2(0.0, 8.0 * (1.0 - shown)));
+                ui.painter().circle_filled(at.center(), if play.hovered() { 22.0 } else { 20.0 }, theme::accent().gamma_multiply(shown));
+                icons::paint_filled(ui.painter(), at.shrink(11.0), icons::PLAY, Color32::BLACK.gamma_multiply(shown));
+            } else {
+                let lit = ui.ctx().animate_bool_with_time(id.with("tocar-luz"), play.hovered(), 0.1);
+                let fill = Color32::from_black_alpha(200).lerp_to_gamma(Color32::WHITE, lit).gamma_multiply(shown);
+                let fg = Color32::WHITE.lerp_to_gamma(Color32::BLACK, lit).gamma_multiply(shown);
+                ui.painter().circle_filled(button.center(), 20.0, fill);
+                icons::paint_filled(ui.painter(), button.shrink(11.0), icons::PLAY, fg);
+            }
         }
         play_clicked = play.clicked();
     }
-    let below = pos2(rect.left(), art.bottom() + 8.0);
-    let t = kit::one_line(ui, title, theme::medium(14.0), theme::TEXT, TILE);
+    let below = pos2(art.left(), art.bottom() + 8.0);
+    let (t, s) = if panels {
+        (kit::two_lines(ui, title, theme::regular(15.0), theme::TEXT, TILE), kit::two_lines(ui, &subtitle, theme::regular(13.0), theme::TEXT_DIM, TILE))
+    } else {
+        (kit::one_line(ui, title, theme::medium(14.0), theme::TEXT, TILE), kit::one_line(ui, &subtitle, theme::regular(13.0), theme::TEXT_DIM, TILE))
+    };
     let th = t.size().y;
     ui.painter().galley(below, t, theme::TEXT);
-    let s = kit::one_line(ui, &subtitle, theme::regular(13.0), theme::TEXT_DIM, TILE);
     ui.painter().galley(below + vec2(0.0, th + 2.0), s, theme::TEXT_DIM);
 
     match item {

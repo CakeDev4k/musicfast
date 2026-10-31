@@ -61,7 +61,8 @@ pub fn chip(ui: &mut Ui, text: &str, selected: bool) -> Response {
         (false, true) => theme::GLASS_HOVER,
         (false, false) => theme::GLASS,
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+    let radius = if theme::panels() { 16 } else { 8 };
+    ui.painter().rect_filled(rect, CornerRadius::same(radius), fill);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
@@ -75,6 +76,14 @@ pub fn one_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -
         break_anywhere: true,
         overflow_character: Some('…'),
     };
+    ui.painter().layout_job(job)
+}
+
+/// Até duas linhas, a segunda cortada com "…" em `width`.
+pub fn two_lines(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
+    let mut job = LayoutJob::simple(text.to_owned(), font, color, width.max(1.0));
+    job.wrap.max_rows = 2;
+    job.wrap.overflow_character = Some('…');
     ui.painter().layout_job(job)
 }
 
@@ -102,6 +111,12 @@ pub fn time(secs: f64) -> String {
     let total = secs.max(0.0) as u64;
     let (h, m, s) = (total / 3600, (total / 60) % 60, total % 60);
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+/// 42 min, 3 h 12 min.
+pub fn long_time(secs: u64) -> String {
+    let (h, m) = (secs / 3600, (secs / 60) % 60);
+    if h > 0 { format!("{h} h {m} min") } else { format!("{m} min") }
 }
 
 /// O círculo que gira enquanto algo carrega.

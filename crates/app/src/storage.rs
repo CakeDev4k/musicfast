@@ -44,7 +44,7 @@ impl Usage {
 
 /// Mede o cache. Lê só metadados; roda numa thread.
 pub fn measure(paths: &Paths) -> Usage {
-    Usage { lyrics: dir_size(&paths.lyrics), covers: dir_size(&paths.art), browser: browser_size(&paths.webview) }
+    Usage { lyrics: dir_size(&paths.lyrics), covers: dir_size(&paths.art), browser: paths.login_profiles().iter().map(|p| browser_size(p)).sum() }
 }
 
 /// Apaga o cache e diz quanto liberou. `browser`: também o do navegador do
@@ -53,7 +53,7 @@ pub fn measure(paths: &Paths) -> Usage {
 pub fn clear(paths: &Paths, browser: bool) -> u64 {
     let mut freed = clear_files(&paths.lyrics) + clear_files(&paths.art);
     if browser {
-        freed += clear_browser(&paths.webview);
+        freed += paths.login_profiles().iter().map(|p| clear_browser(p)).sum::<u64>();
     }
     log::info!("cache limpo: {} liberados", human(freed));
     freed

@@ -6,9 +6,13 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accounts;
 mod app;
+mod bar_layout;
 mod bench;
 mod covers;
+mod discord;
+mod dragout;
 mod fonts;
 mod icon;
 mod jobs;
@@ -73,7 +77,7 @@ fn main() -> eframe::Result<()> {
     // não disputa a vaga de instância única nem o log.
     match std::env::args().nth(1).as_deref() {
         // O idioma vem do app que abriu a janela (`musicfast_i18n::ENV`).
-        Some("--entrar") => login::window(Paths::new().webview, std::env::args().nth(2).as_deref() == Some(login::SILENT)),
+        Some("--entrar") => login::window(login::profile_from_env(Paths::new().webview), std::env::args().nth(2).as_deref() == Some(login::SILENT)),
         Some("--medir") => bench::run(),
         Some("--exportar-icone") => {
             let dir = std::env::args().nth(2).unwrap_or_else(|| ".".to_owned());

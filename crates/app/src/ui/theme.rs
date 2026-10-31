@@ -1,6 +1,8 @@
 //! As cores e medidas, as do site do YouTube Music: fundo quase preto,
 //! texto branco e cinzas, o vermelho só onde algo toca.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use egui::{Color32, CornerRadius, FontId, Stroke, Style, vec2};
 use fastframe_fonts::Weight;
 
@@ -28,7 +30,29 @@ pub const GLASS: Color32 = Color32::from_rgba_premultiplied(22, 22, 22, 22);
 pub const GLASS_HOVER: Color32 = Color32::from_rgba_premultiplied(38, 38, 38, 38);
 pub const GLASS_ACTIVE: Color32 = Color32::from_rgba_premultiplied(56, 56, 56, 56);
 
+/// A interface em painéis: o fundo deles e o verde que fica no lugar do
+/// vermelho.
+pub const PANEL: Color32 = Color32::from_rgb(18, 18, 18);
+pub const GREEN: Color32 = Color32::from_rgb(30, 215, 96);
+
 pub const RADIUS: u8 = 8;
+
+/// A interface em painéis está ligada. Fica aqui, e não no `Cx`, porque as
+/// peças pequenas (`kit`) também mudam com ela e não recebem o `Cx`.
+static PANELS: AtomicBool = AtomicBool::new(false);
+
+pub fn panels() -> bool {
+    PANELS.load(Ordering::Relaxed)
+}
+
+pub fn set_panels(on: bool) {
+    PANELS.store(on, Ordering::Relaxed);
+}
+
+/// A cor de destaque da interface escolhida.
+pub fn accent() -> Color32 {
+    if panels() { GREEN } else { ACCENT }
+}
 
 pub fn regular(size: f32) -> FontId {
     Weight::Regular.font_id(size)
