@@ -278,7 +278,9 @@ mod win {
                 release_com(data);
                 String::from_utf16_lossy(&buf[..n])
             };
-            assert_eq!(std::path::PathBuf::from(dropped), path);
+            // A pasta temporária pode vir no nome curto (`RUNNER~1`) e o
+            // arrasto, no longo: vale ser o mesmo arquivo.
+            assert_eq!(std::fs::canonicalize(dropped).unwrap(), std::fs::canonicalize(&path).unwrap());
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
