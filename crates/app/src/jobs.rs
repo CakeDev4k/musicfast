@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use musicfast_ytm::{Card, Client, Item, Kind, Page, Track, Watch};
@@ -38,8 +39,8 @@ pub enum Reply {
     Art { video_id: String, path: PathBuf },
     Version(String),
     /// A janela de login fechou: os cookies, ou `None` se foi cancelada.
-    /// `silent`: foi a renovação sem janela.
-    Login { silent: bool, result: Result<Option<String>, String> },
+    /// `silent`: foi a renovação sem janela. `slot`: a conta (`Profile::id`).
+    Login { silent: bool, slot: String, result: Result<Option<String>, String> },
     Account(Result<musicfast_ytm::Session, String>),
     Playlists(Result<Vec<Card>, String>),
     /// Um trabalho que não tem o que dizer à tela (a busca adiantada que
@@ -53,17 +54,34 @@ pub enum Reply {
     Done { message: String, result: Result<(), String>, refresh: Refresh },
 }
 
+impl Reply {
+    /// A resposta só vale para a conta que pediu: página personalizada,
+    /// playlists, curtidas. Entregue depois da troca, mostraria a conta
+    /// anterior.
+    fn belongs_to_account(&self) -> bool {
+        matches!(self, Self::Page { .. } | Self::More { .. } | Self::TrackInfo { .. } | Self::Related { .. } | Self::Account(_) | Self::Playlists(_))
+    }
+}
+
 pub struct Jobs {
     client: Arc<Client>,
     http: Arc<reqwest::blocking::Client>,
     tx: Sender<Reply>,
     ctx: egui::Context,
+    /// Muda a cada troca de conta (`new_account`).
+    account_epoch: Arc<AtomicU64>,
 }
 
 impl Jobs {
     pub fn new(client: Arc<Client>, http: Arc<reqwest::blocking::Client>, ctx: egui::Context) -> (Self, Receiver<Reply>) {
         let (tx, rx) = channel();
-        (Self { client, http, tx, ctx }, rx)
+        (Self { client, http, tx, ctx, account_epoch: Arc::new(AtomicU64::new(0)) }, rx)
+    }
+
+    /// A partir daqui, o que estava a caminho para a conta anterior é jogado
+    /// fora. Vem antes de trocar a sessão do `Client`.
+    pub fn new_account(&self) {
+        self.account_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
     fn spawn(&self, name: &str, work: impl FnOnce(&Client, &reqwest::blocking::Client) -> Reply + Send + 'static) {
@@ -81,6 +99,8 @@ impl Jobs {
     ) {
         let (client, http, tx, ctx) = (self.client.clone(), self.http.clone(), self.tx.clone(), self.ctx.clone());
         let thread = name.to_owned();
+        let epoch = self.account_epoch.clone();
+        let asked_in = epoch.load(Ordering::Relaxed);
         let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
             let reply = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&client, &http))) {
                 Ok(reply) => Some(reply),
@@ -90,7 +110,8 @@ impl Jobs {
                     on_panic
                 }
             };
-            if let Some(reply) = reply
+            let stale = epoch.load(Ordering::Relaxed) != asked_in;
+            if let Some(reply) = reply.filter(|r| !(stale && r.belongs_to_account()))
                 && tx.send(reply).is_ok()
             {
                 ctx.request_repaint();
@@ -110,6 +131,8 @@ impl Jobs {
                 View::Library(tab) => client.browse(tab.browse_id(), None),
                 View::Search { query, filter } => client.search(query, *filter),
                 View::Browse { id, params } => client.browse(id, params.as_deref()),
+                // Lida do disco (`Offline`), nunca pedida ao YouTube.
+                View::Downloads => return Reply::Page { view, result: Err(String::new()) },
             };
             Reply::Page { view, result: result.map_err(|e| e.to_string()) }
         });
@@ -240,7 +263,7 @@ impl Jobs {
             if let Some(dir) = path.parent() {
                 crate::app::clean_art(dir);
             }
-            let bytes = http.get(&url).send().and_then(|r| r.error_for_status()).and_then(|r| r.bytes());
+            let bytes = crate::covers::read(&http, &url);
             match bytes {
                 Ok(bytes) => {
                     if let Err(error) = std::fs::write(&path, &bytes) {
@@ -264,9 +287,9 @@ impl Jobs {
     }
 
     /// `silent`: renova a sessão pelo perfil guardado, sem mostrar janela.
-    pub fn sign_in(&self, silent: bool) {
-        let failed = Reply::Login { silent, result: Err(musicfast_i18n::t().login_window_crashed.into()) };
-        self.spawn_or("login", Some(failed), move |_, _| Reply::Login { silent, result: crate::login::sign_in(silent) });
+    pub fn sign_in(&self, silent: bool, slot: String, profile: PathBuf) {
+        let failed = Reply::Login { silent, slot: slot.clone(), result: Err(musicfast_i18n::t().login_window_crashed.into()) };
+        self.spawn_or("login", Some(failed), move |_, _| Reply::Login { silent, slot, result: crate::login::sign_in(silent, &profile) });
     }
 
     pub fn account(&self) {

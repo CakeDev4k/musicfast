@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use egui::{Align2, CornerRadius, Frame, Key, Modifiers, PointerButton, Sense, Ui, ViewportCommand, vec2};
 use fastframe_instance::Guard;
 use fastframe_now_playing as np;
-use musicfast_player::{Command, Config, Player, Repeat, Snapshot, Status};
+use musicfast_player::{Command, Config, Offline, Player, Repeat, Snapshot, Status};
 use musicfast_i18n::{Lang, t};
 use musicfast_ytm::{Auth, Client, LikeStatus, Session};
 
@@ -144,11 +144,34 @@ pub struct MusicApp {
     analyzer: crate::viz::Analyzer,
     /// A janela de escolher arquivo aberta, e para qual superfície.
     picking: Option<std::sync::mpsc::Receiver<(crate::look::Surface, Option<PathBuf>)>>,
+    /// As músicas baixadas para ouvir sem internet.
+    offline: Arc<Offline>,
+    /// As baixadas como a página as desenha, e de qual revisão do `Offline`.
+    download_tracks: (u64, Arc<Vec<musicfast_ytm::Track>>),
+    /// A organização da janela.
+    shell: crate::ui::Shell,
+    /// A biblioteca da interface em painéis.
+    library: crate::ui::panels::Library,
+    /// A aba, o filtro e a ordem escolhidos na página das baixadas.
+    downloads_page: crate::ui::downloads::Browser,
+    /// A janela de escolher a pasta das baixadas, aberta.
+    picking_folder: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    /// A música no perfil do Discord: o canal, as escolhas e o que foi
+    /// mandado por último (`video_id`, tocando, quando começou em ms).
+    discord: crate::discord::Discord,
+    discord_settings: crate::discord::Settings,
+    discord_sent: Option<(String, bool, u64)>,
+    /// O HWND da janela (o arrasto do arquivo para fora precisa dele).
+    window_handle: Option<isize>,
+    /// Um arrasto de arquivo acabou: o laço do Windows comeu o soltar do
+    /// botão, e o egui precisa ouvi-lo (`raw_input_hook`).
+    release_pointer: bool,
 }
 
 impl MusicApp {
     pub fn new(ctx: &egui::Context, startup: Startup) -> Self {
         let Startup { paths, saved, wake, instance, update_receipt, update_error } = startup;
+        crate::ui::theme::set_panels(saved.shell == crate::ui::Shell::Panels);
         let language = saved.language.as_deref().and_then(Lang::from_tag);
         let locale = musicfast_i18n::apply(language);
         log::info!("idioma {} ({}), sistema {:?}", locale.tag(), if language.is_some() { "escolhido" } else { "automático" }, musicfast_i18n::system());
@@ -168,19 +191,38 @@ impl MusicApp {
         let repaint = ctx.clone();
         let look = saved.look.clone();
         let backdrops = crate::look::Images::new(ctx, http.clone(), &look);
+        let offline_waker = ctx.clone();
+        let folders = musicfast_player::offline::Folders {
+            index: paths.download_index.clone(),
+            default_dir: paths.downloads.clone(),
+            covers: paths.download_covers.clone(),
+            bin: paths.bin.clone(),
+            cookies: paths.root.join("tmp"),
+        };
+        let offline = Offline::open(folders, saved.downloads_dir.clone(), Arc::new(move || offline_waker.request_repaint()));
         let player = Player::start(
             Config {
                 bin_dir: paths.bin.clone(),
                 cache_file: paths.resolved.clone(),
                 client: client.clone(),
                 volume: saved.volume,
+                offline: Some(offline.clone()),
             },
             Arc::new(move || repaint.request_repaint()),
         );
         // A conta vai antes da fila restaurada: a música dela já é pedida
         // como a conta (256 kbps no Premium).
-        let session_cookie = crate::vault::load(&paths.session).filter(|c| Auth::from_cookie_header(c).is_some());
+        let mut accounts = crate::accounts::sane(saved.accounts.clone());
+        let mut active = saved.active_account.clone().filter(|id| accounts.iter().any(|p| p.id == *id));
+        // Sem lista, vale o lugar de antes das várias contas.
+        let slot = active.clone().or_else(|| accounts.is_empty().then(String::new));
+        let session_cookie = slot.as_deref().and_then(|id| crate::vault::load(&paths.session_of(id))).filter(|c| Auth::from_cookie_header(c).is_some());
+        if session_cookie.is_some() && accounts.is_empty() {
+            accounts.push(crate::accounts::Profile::new(""));
+            active = Some(String::new());
+        }
         player.send(Command::SetAccount(session_cookie.clone()));
+        offline.set_account(session_cookie.clone());
         player.send(Command::SetShuffle(saved.shuffle));
         player.send(Command::SetRepeat(saved.repeat));
         if !saved.queue.is_empty() {
@@ -195,10 +237,12 @@ impl MusicApp {
         }
         // A sessão da conta, se houver: as chamadas já saem logadas, e a
         // conferência (`account`) diz se ela ainda vale.
-        let mut me = Me::default();
+        let shown = active.as_ref().and_then(|id| accounts.iter().find(|p| p.id == *id)).and_then(|p| p.account());
+        let mut me = Me { accounts, active, ..Me::default() };
         if let Some(auth) = session_cookie.as_deref().and_then(Auth::from_cookie_header) {
             client.set_auth(Some(auth));
             me.signed_in = true;
+            me.account = shown;
             jobs.account();
             jobs.playlists();
         }
@@ -206,6 +250,8 @@ impl MusicApp {
         jobs.clean_lyrics(paths.lyrics.clone());
         let waker = ctx.clone();
         let controls = np::NowPlaying::start(np::App::new("musicfast", "MusicFast"), move || waker.request_repaint());
+        let waker = ctx.clone();
+        let discord = crate::discord::Discord::start(move || waker.request_repaint());
         Self {
             covers: Covers::new(ctx, http),
             wake,
@@ -236,7 +282,16 @@ impl MusicApp {
             translating: std::collections::HashSet::new(),
             translate_failed: std::collections::HashSet::new(),
             lyrics_fonts: crate::look::LyricsFonts::default(),
-            bar: BarState { seeking: None, unmuted: saved.volume.max(0.1) },
+            bar: BarState {
+                seeking: None,
+                unmuted: saved.volume.max(0.1),
+                layouts: saved.bar.clone().sane(),
+                discord_on: saved.discord.on,
+                discord_link: crate::discord::Link::Off,
+            },
+            discord,
+            discord_settings: saved.discord.clone(),
+            discord_sent: None,
             warmed: None,
             toast: None,
             last_notice: 0,
@@ -270,6 +325,14 @@ impl MusicApp {
             backdrops,
             analyzer: crate::viz::Analyzer::default(),
             picking: None,
+            offline,
+            download_tracks: (u64::MAX, Arc::new(Vec::new())),
+            shell: saved.shell,
+            library: Default::default(),
+            downloads_page: Default::default(),
+            picking_folder: None,
+            window_handle: None,
+            release_pointer: false,
             paths,
         }
     }
@@ -279,6 +342,10 @@ impl MusicApp {
     }
 
     fn ensure_loaded(&mut self, view: &View) {
+        // As baixadas vêm do disco (`Offline`), não do YouTube.
+        if *view == View::Downloads {
+            return;
+        }
         let needs = self.pages.get(view).is_none_or(|s| s.page.is_none() && s.error.is_some());
         if needs {
             self.pages.insert(view.clone(), PageState::default());
@@ -362,6 +429,11 @@ impl MusicApp {
                 }
             }
             Action::ToggleSidebar => self.sidebar_mini = !self.sidebar_mini,
+            Action::SetShell(shell) => {
+                self.shell = shell;
+                crate::ui::theme::set_panels(shell == crate::ui::Shell::Panels);
+            }
+            Action::LoadLibrary(tab) => self.ensure_loaded(&View::Library(tab)),
             Action::ToggleSide(which) => {
                 self.side = if self.side == Some(which) { None } else { Some(which) };
                 self.expanded = false;
@@ -370,10 +442,11 @@ impl MusicApp {
             Action::Mini(true) => self.enter_mini(ctx),
             Action::Mini(false) => self.leave_mini(ctx),
             Action::SignIn => {
-                self.me.signing_in = true;
-                self.jobs.sign_in(false);
-                self.say(ctx, t().sign_in_in_window);
+                let slot = self.me.active.clone().unwrap_or_else(|| crate::accounts::free_id(&self.me.accounts));
+                self.open_login(ctx, slot);
             }
+            Action::AddAccount => self.open_login(ctx, crate::accounts::new_id()),
+            Action::SwitchAccount(id) => self.switch_account(ctx, &id),
             Action::SignOut => self.sign_out(ctx, t().signed_out),
             Action::SubmitCookies(cookie) => self.start_session(ctx, &cookie, false),
             Action::RestartToUpdate => match self.updates.restart() {
@@ -449,8 +522,14 @@ impl MusicApp {
                 if look.lyrics.translation_key() != self.look.lyrics.translation_key() {
                     self.translate_failed.clear();
                 }
+                let rescaled = look.mini_layout.scale() != self.look.mini_layout.scale();
                 self.look = look;
                 self.backdrops.sync(ctx, &self.look);
+                if rescaled && self.mini.is_some() {
+                    let scale = self.look.mini_layout.scale();
+                    ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(vec2(mini::width(scale), mini::row_height(scale))));
+                    self.place_mini(ctx);
+                }
             }
             Action::PickBackdropFile(surface) => {
                 if self.picking.is_some() {
@@ -466,7 +545,134 @@ impl MusicApp {
                 });
                 self.picking = Some(rx);
             }
+            Action::CustomizeBar => {
+                self.dialog = Some(Dialog::Bar { layouts: self.bar.layouts.clone(), discord: self.discord_settings.clone(), link: self.discord.link() });
+            }
+            Action::SetBar(layouts) => self.bar.layouts = layouts,
+            Action::ToggleDiscord => {
+                let on = !self.discord_settings.on;
+                let settings = crate::discord::Settings { on, ..self.discord_settings.clone() };
+                self.set_discord(settings);
+                self.say(ctx, if on { t().discord_turned_on } else { t().discord_turned_off });
+            }
+            Action::SetDiscord(settings) => self.set_discord(settings),
+            Action::Download(track) => {
+                self.offline.dismiss(&track.video_id);
+                self.offline.download(track);
+            }
+            Action::CopyLink(video_id) => {
+                ctx.copy_text(format!("https://music.youtube.com/watch?v={video_id}"));
+                self.say(ctx, t().link_copied);
+            }
+            Action::DeleteDownload(video_id) => {
+                if let Err(error) = self.offline.delete(&video_id) {
+                    self.say(ctx, &t().delete_download_failed(&error));
+                }
+            }
+            Action::DragOut(path) => {
+                match crate::dragout::start(self.window_handle, &path) {
+                    Ok(crate::dragout::Outcome::Unsupported) => crate::dragout::reveal(&path),
+                    Ok(outcome) => {
+                        log::info!("arrasto de {}: {outcome:?}", path.display());
+                        self.release_pointer = true;
+                        ctx.request_repaint();
+                    }
+                    Err(error) => {
+                        log::warn!("arrasto de {}: {error}", path.display());
+                        self.release_pointer = true;
+                        self.say(ctx, &t().drag_out_failed(&error));
+                    }
+                }
+            }
+            Action::Reveal(path) => crate::dragout::reveal(&path),
+            Action::OpenDownloads => crate::dragout::open_folder(&self.offline.dir()),
+            Action::PickDownloadsFolder => {
+                if self.picking_folder.is_some() {
+                    return;
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                let waker = ctx.clone();
+                let start = self.offline.dir();
+                let _ = std::thread::Builder::new().name("escolher-pasta".into()).spawn(move || {
+                    let picked = rfd::FileDialog::new().set_directory(start).pick_folder();
+                    let _ = tx.send(picked);
+                    waker.request_repaint();
+                });
+                self.picking_folder = Some(rx);
+            }
+            Action::ResetDownloadsFolder => self.set_downloads_dir(ctx, None),
         }
+    }
+
+    /// As escolhas do Discord, que valem na hora: a música volta a ser
+    /// mandada com elas, ou o canal fecha e ela sai do perfil.
+    fn set_discord(&mut self, settings: crate::discord::Settings) {
+        self.bar.discord_on = settings.on;
+        self.discord_settings = settings;
+        self.discord_sent = None;
+        if !self.discord_settings.on {
+            self.discord.stop();
+        }
+    }
+
+    /// Avisa o Discord quando a música muda, pausa ou salta. Em pausa ela
+    /// sai do perfil, como no Spotify; no carregamento fica como está, para
+    /// não piscar entre uma música e outra.
+    fn discord_presence(&mut self) {
+        self.bar.discord_link = self.discord.link();
+        if let Some(Dialog::Bar { link, .. }) = self.dialog.as_mut() {
+            *link = self.bar.discord_link;
+        }
+        if !self.bar.discord_on {
+            return;
+        }
+        let snap = &self.snap;
+        let track = snap.current().filter(|t| !t.video_id.is_empty());
+        if track.is_some() && snap.status == Status::Loading {
+            return;
+        }
+        let playing = track.is_some() && snap.status == Status::Playing;
+        let id = track.map(|t| t.video_id.clone()).unwrap_or_default();
+        let position_ms = (self.player.position().max(0.0) * 1000.0) as u64;
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        let start_ms = now_ms.saturating_sub(position_ms);
+        // Só um salto de verdade reenvia: a conta oscila uns milissegundos.
+        if let Some((sent_id, sent_playing, sent_start)) = &self.discord_sent
+            && *sent_id == id
+            && *sent_playing == playing
+            && (!playing || sent_start.abs_diff(start_ms) < 3000)
+        {
+            return;
+        }
+        let activity = track.filter(|_| playing).map(|song| {
+            let duration = snap.duration.or(song.duration_secs.map(f64::from));
+            let shown = crate::discord::Song {
+                video_id: song.video_id.clone(),
+                title: song.title.clone(),
+                artist: song.artist_names(),
+                album: song.album.as_ref().map(|a| a.name.clone()),
+                cover: song.thumbs.url_for(512),
+                start_ms,
+                end_ms: duration.filter(|d| *d > 0.0).map(|d| start_ms + (d * 1000.0) as u64),
+            };
+            crate::discord::activity(&shown, self.discord_settings.promote.then_some(t().discord_site_button), t().discord_listen)
+        });
+        self.discord.set(crate::discord::APP_ID, activity);
+        self.discord_sent = Some((id, playing, start_ms));
+    }
+
+    /// A pasta dos próximos downloads (`None`: a do app), guardada já na
+    /// sessão para valer mesmo se o app fechar de repente.
+    fn set_downloads_dir(&mut self, ctx: &egui::Context, dir: Option<PathBuf>) {
+        let dir = dir.filter(|d| d.as_path() != self.offline.default_dir());
+        if let Some(d) = &dir
+            && let Err(error) = std::fs::create_dir_all(d)
+        {
+            self.say(ctx, &t().folder_unusable(&error.to_string()));
+            return;
+        }
+        self.offline.set_dir(dir);
+        self.session().save_now(&self.paths.state);
     }
 
     /// "Procurar outra letra": a próxima candidata diferente da que está na
@@ -557,25 +763,97 @@ impl MusicApp {
             self.say(ctx, t().session_missing);
             return;
         };
+        // Os cookies colados não passam pela janela: entram num lugar aqui.
+        if self.me.active.is_none() {
+            self.enter_slot(&crate::accounts::free_id(&self.me.accounts));
+        }
         self.client.set_auth(Some(auth));
         self.player.send(Command::SetAccount(Some(cookie.to_owned())));
-        crate::vault::save(&self.paths.session, cookie);
+        self.offline.set_account(Some(cookie.to_owned()));
+        crate::vault::save(&self.session_file(), cookie);
         self.me.signed_in = true;
         self.jobs.account();
         self.jobs.playlists();
         self.account_checked = Instant::now();
         self.reload_all();
+        // A lista de contas não espera a gravação periódica: fechar agora
+        // reabriria numa conta que já não existe.
+        self.session().save_now(&self.paths.state);
         if !quiet {
             self.say(ctx, t().connected);
         }
     }
 
-    /// Sair de verdade: esquece também o perfil do login, e a próxima
-    /// entrada pede a conta de novo.
-    fn sign_out(&mut self, ctx: &egui::Context, message: &str) {
-        let profile = self.paths.webview.clone();
+    /// Onde a sessão da conta aberta fica guardada.
+    fn session_file(&self) -> PathBuf {
+        self.paths.session_of(self.me.active.as_deref().unwrap_or_default())
+    }
+
+    /// A janela de login de uma conta (nova, ou uma guardada que venceu).
+    fn open_login(&mut self, ctx: &egui::Context, slot: String) {
+        self.me.signing_in = true;
+        let profile = self.paths.webview_of(&slot);
+        self.jobs.sign_in(false, slot, profile);
+        self.say(ctx, t().sign_in_in_window);
+    }
+
+    /// Passa a estar na conta `id`: tudo que era da anterior sai da tela e o
+    /// que vinha a caminho para ela é descartado. A música não para.
+    fn enter_slot(&mut self, id: &str) {
+        self.jobs.new_account();
+        let mut accounts = std::mem::take(&mut self.me.accounts);
+        if !accounts.iter().any(|p| p.id == id) {
+            accounts.push(crate::accounts::Profile::new(id));
+        }
+        let account = accounts.iter().find(|p| p.id == id).and_then(|p| p.account());
+        self.me = Me { accounts, active: Some(id.to_owned()), account, ..Me::default() };
+        self.renew_tried = false;
+    }
+
+    /// Um clique na foto de outra conta. Sem sessão guardada (venceu), abre
+    /// o login dela.
+    fn switch_account(&mut self, ctx: &egui::Context, id: &str) {
+        if self.me.signed_in && self.me.active.as_deref() == Some(id) {
+            return;
+        }
+        let cookie = crate::vault::load(&self.paths.session_of(id)).filter(|c| Auth::from_cookie_header(c).is_some());
+        let Some(cookie) = cookie else {
+            self.open_login(ctx, id.to_owned());
+            return;
+        };
+        self.enter_slot(id);
+        self.start_session(ctx, &cookie, true);
+        // A curtida da música atual é da conta nova.
+        if let Some(track) = self.snap.current() {
+            self.jobs.track_info(track.video_id.clone());
+        }
+        let name = self.me.account.as_ref().map(|a| a.name.clone());
+        if let Some(name) = name {
+            self.say(ctx, &t().now_in_account(&name));
+        }
+    }
+
+    /// Apaga a sessão e o perfil de login de uma conta.
+    fn forget_account(&mut self, id: &str) {
+        crate::vault::clear(&self.paths.session_of(id));
+        let profile = self.paths.webview_of(id);
         let _ = std::thread::Builder::new().name("sair".into()).spawn(move || crate::login::forget(&profile));
-        self.drop_session(ctx, message);
+        self.me.accounts.retain(|p| p.id != id);
+    }
+
+    /// Sair de verdade: esquece a conta aberta, sessão e perfil do login, e
+    /// a próxima entrada pede a conta de novo. Havendo outra guardada, o app
+    /// passa para ela.
+    fn sign_out(&mut self, ctx: &egui::Context, message: &str) {
+        let id = self.me.active.take().unwrap_or_default();
+        self.forget_account(&id);
+        let next = self.me.accounts.iter().map(|p| p.id.clone()).find(|other| {
+            crate::vault::load(&self.paths.session_of(other)).is_some_and(|c| Auth::from_cookie_header(&c).is_some())
+        });
+        match next {
+            Some(next) => self.switch_account(ctx, &next),
+            None => self.drop_session(ctx, message),
+        }
     }
 
     /// A sessão venceu e a renovação não deu: sai, mas guarda o perfil do
@@ -583,13 +861,17 @@ impl MusicApp {
     fn drop_session(&mut self, ctx: &egui::Context, message: &str) {
         self.client.set_auth(None);
         self.player.send(Command::SetAccount(None));
-        crate::vault::clear(&self.paths.session);
-        self.me = Me::default();
+        self.offline.set_account(None);
+        crate::vault::clear(&self.session_file());
+        let accounts = std::mem::take(&mut self.me.accounts);
+        let active = self.me.active.take();
+        self.me = Me { accounts, active, ..Me::default() };
         if self.view().needs_account() {
             self.history = vec![View::Home];
             self.at = 0;
         }
         self.reload_all();
+        self.session().save_now(&self.paths.state);
         self.say(ctx, message);
     }
 
@@ -601,6 +883,11 @@ impl MusicApp {
         self.info.clear();
         let view = self.view().clone();
         self.ensure_loaded(&view);
+        // A aba de álbuns ou artistas da biblioteca em painéis vem das páginas.
+        let tab = self.library.tab();
+        if self.me.signed_in && tab != crate::ui::LibraryTab::Playlists {
+            self.ensure_loaded(&View::Library(tab));
+        }
     }
 
     fn say(&mut self, ctx: &egui::Context, text: &str) {
@@ -771,7 +1058,14 @@ impl MusicApp {
                     };
                     self.related.insert(video_id, state);
                 }
-                Reply::Login { silent: true, result } => match result {
+                // A pessoa trocou de conta enquanto a renovação corria: o que
+                // veio é só da conta que pediu.
+                Reply::Login { silent: true, slot, result } if self.me.active.as_ref() != Some(&slot) => {
+                    if let Ok(Some(cookie)) = result {
+                        crate::vault::save(&self.paths.session_of(&slot), &cookie);
+                    }
+                }
+                Reply::Login { silent: true, result, .. } => match result {
                     Ok(Some(cookie)) => {
                         log::info!("sessão renovada sem janela");
                         self.start_session(ctx, &cookie, true);
@@ -782,10 +1076,19 @@ impl MusicApp {
                         self.drop_session(ctx, t().session_expired);
                     }
                 },
-                Reply::Login { silent: false, result } => {
+                Reply::Login { silent: false, slot, result } => {
                     self.me.signing_in = false;
+                    let keep = matches!(result, Ok(Some(_))) || self.me.accounts.iter().any(|p| p.id == slot);
+                    // A conta nova desistida não deixa perfil para trás.
+                    if !keep && !slot.is_empty() {
+                        let profile = self.paths.webview_of(&slot);
+                        let _ = std::thread::Builder::new().name("sair".into()).spawn(move || crate::login::forget(&profile));
+                    }
                     match result {
-                        Ok(Some(cookie)) => self.start_session(ctx, &cookie, false),
+                        Ok(Some(cookie)) => {
+                            self.enter_slot(&slot);
+                            self.start_session(ctx, &cookie, false);
+                        }
                         Ok(None) => self.say(ctx, t().login_cancelled),
                         Err(error) => {
                             log::warn!("login: {error}");
@@ -796,6 +1099,15 @@ impl MusicApp {
                 Reply::Account(result) => match result {
                     Ok(Session::Active(account)) => {
                         log::info!("conta conectada");
+                        let active = self.me.active.clone().unwrap_or_default();
+                        // Entrou de novo numa conta já guardada: fica a nova.
+                        let repeated: Vec<String> = self.me.accounts.iter().filter(|p| p.id != active && p.same_as(&account)).map(|p| p.id.clone()).collect();
+                        for id in repeated {
+                            self.forget_account(&id);
+                        }
+                        if let Some(profile) = self.me.accounts.iter_mut().find(|p| p.id == active) {
+                            profile.update(&account);
+                        }
                         self.me.account = Some(account);
                         self.renew_tried = false;
                     }
@@ -804,7 +1116,9 @@ impl MusicApp {
                     Ok(Session::SignedOut) if self.me.signed_in && !self.renew_tried => {
                         log::info!("sessão vencida; renovando sem janela");
                         self.renew_tried = true;
-                        self.jobs.sign_in(true);
+                        let slot = self.me.active.clone().unwrap_or_default();
+                        let profile = self.paths.webview_of(&slot);
+                        self.jobs.sign_in(true, slot, profile);
                     }
                     Ok(Session::SignedOut) if self.me.signed_in => self.drop_session(ctx, t().session_expired),
                     Ok(Session::SignedOut) => {}
@@ -1101,6 +1415,12 @@ impl MusicApp {
             language: self.language.map(|l| l.code().to_owned()),
             look: self.look.clone(),
             translate_lyrics: self.translate_lyrics,
+            downloads_dir: self.offline.has_chosen_dir().then(|| self.offline.dir()),
+            shell: self.shell,
+            accounts: self.me.accounts.clone(),
+            active_account: self.me.active.clone(),
+            bar: self.bar.layouts.clone(),
+            discord: self.discord_settings.clone(),
         }
     }
 
@@ -1147,9 +1467,10 @@ impl MusicApp {
         let (maximized, outer) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().outer_rect));
         self.track_window(ctx);
         self.mini = Some(Mini { lyrics: false, was_maximized: maximized });
+        let scale = self.look.mini_layout.scale();
         self.expanded = false;
         let anchor = self.mini_anchor.unwrap_or_else(|| match outer {
-            Some(r) => [r.right() - mini::WIDTH - 24.0, r.bottom() - 24.0],
+            Some(r) => [r.right() - mini::width(scale) - 24.0, r.bottom() - 24.0],
             None => [100.0, 700.0],
         });
         self.mini_anchor = Some(anchor);
@@ -1158,7 +1479,7 @@ impl MusicApp {
         }
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
-        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(vec2(mini::WIDTH, mini::ROW)));
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(vec2(mini::width(scale), mini::row_height(scale))));
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
         self.place_mini(ctx);
         self.round_corners = Some(true);
@@ -1167,8 +1488,9 @@ impl MusicApp {
     /// Tamanho e lugar do mini player, com o pé em `mini_anchor`.
     fn place_mini(&self, ctx: &egui::Context) {
         let (Some(mini), Some([x, bottom])) = (&self.mini, self.mini_anchor) else { return };
-        let h = mini::height(mini.lyrics);
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(mini::WIDTH, h)));
+        let scale = self.look.mini_layout.scale();
+        let h = mini::height(mini.lyrics, scale);
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(mini::width(scale), h)));
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x, bottom - h)));
     }
 
@@ -1201,7 +1523,7 @@ impl MusicApp {
         // Guarda onde a pessoa o arrastou (quando a janela já tem o tamanho
         // pedido: no meio de uma troca, o retângulo ainda é o de antes).
         if let Some(r) = ctx.input(|i| i.viewport().outer_rect)
-            && (r.height() - mini::height(lyrics_open)).abs() < 2.0
+            && (r.height() - mini::height(lyrics_open, self.look.mini_layout.scale())).abs() < 2.0
             && !ctx.input(|i| i.viewport().minimized.unwrap_or(false))
         {
             self.mini_anchor = Some([r.left(), r.bottom()]);
@@ -1211,7 +1533,7 @@ impl MusicApp {
         let lyrics = lyrics_open.then(|| current.as_ref().and_then(|id| self.lyrics.get(id)));
         let mut out = mini::Out::default();
         egui::CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
-            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency: mini_latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency: mini_latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing, offline: Some(&*self.offline) };
             let skin = &self.look.mini;
             let backdrop = if *skin == crate::look::Skin::default() {
                 None
@@ -1226,7 +1548,7 @@ impl MusicApp {
                     crate::look::paint(ui, rect, skin, images.get(surface), &crate::look::Now { cover, sound }, surface.base());
                 }
             };
-            out = mini::show(ui, &mut cx, &self.snap, position, lyrics, backdrop.is_some().then_some(&paint as &dyn Fn(&Ui, egui::Rect)));
+            out = mini::show(ui, &mut cx, &self.snap, position, lyrics, backdrop.is_some().then_some(&paint as &dyn Fn(&Ui, egui::Rect)), &self.look.mini_layout);
         });
         if out.toggle_lyrics
             && let Some(m) = self.mini.as_mut()
@@ -1374,6 +1696,24 @@ fn background(ctx: &egui::Context, dark: f32) {
     ctx.layer_painter(egui::LayerId::background()).add(mesh);
 }
 
+/// O HWND da janela, no Windows (o arrasto de arquivo para fora precisa).
+fn window_handle(frame: &eframe::Frame) -> Option<isize> {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let handle = frame.window_handle().ok()?;
+        match handle.as_raw() {
+            RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+            _ => None,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = frame;
+        None
+    }
+}
+
 /// Cantos redondos (o mini player) ou os do sistema, pelo DWM do Windows 11.
 /// Noutros sistemas, e no Windows 10, não faz nada.
 fn round_corners(frame: &eframe::Frame, round: bool) {
@@ -1413,7 +1753,8 @@ fn update_badge(ui: &mut Ui, cx: &mut Cx, top: egui::Rect, state: &crate::update
     };
     let font = theme::semibold(13.0);
     let width = ui.fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme::TEXT).size().x) + 28.0;
-    let rect = Rect::from_center_size(pos2(top.right() - 76.0 - width / 2.0, top.center().y), vec2(width, 32.0));
+    let quick = nav::quick_accounts_width(cx.me, top.width());
+    let rect = Rect::from_center_size(pos2(top.right() - 76.0 - quick - width / 2.0, top.center().y), vec2(width, 32.0));
     let clickable = !matches!(state, State::Downloading { .. });
     let resp = ui.interact(rect, Id::new("atualizacao"), if clickable { Sense::click() } else { Sense::hover() });
     let fill = match (state, resp.hovered()) {
@@ -1471,6 +1812,7 @@ impl eframe::App for MusicApp {
         }
         self.refresh_snapshot(ctx);
         self.media_controls(ctx);
+        self.discord_presence();
         self.track_window(ctx);
         self.track_wanted();
         self.autosave();
@@ -1508,6 +1850,12 @@ impl eframe::App for MusicApp {
         }
         if let Some(error) = self.backdrops.poll(&ctx) {
             self.say(&ctx, &t().image_load_failed(&error));
+        }
+        if let Some(picked) = self.picking_folder.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.picking_folder = None;
+            if let Some(dir) = picked {
+                self.set_downloads_dir(&ctx, Some(dir));
+            }
         }
         if let Some((surface, picked)) = self.picking.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.picking = None;
@@ -1550,6 +1898,13 @@ impl eframe::App for MusicApp {
         if let Some(round) = self.round_corners.take() {
             round_corners(_frame, round);
         }
+        if self.window_handle.is_none() {
+            self.window_handle = window_handle(_frame);
+        }
+        let revision = self.offline.revision();
+        if self.download_tracks.0 != revision {
+            self.download_tracks = (revision, Arc::new(self.offline.tracks()));
+        }
         if self.mini.is_some() {
             self.mini_ui(ui, actions, position);
             return;
@@ -1569,7 +1924,10 @@ impl eframe::App for MusicApp {
         let dark = ctx.animate_bool_with_time_and_easing(egui::Id::new("player-aberto"), expanded, 0.3, egui::emath::easing::cubic_out);
         // A tela principal personalizada no lugar do degradê do site.
         let home = &self.look.home;
-        if *home == crate::look::Skin::default() {
+        let panels = self.shell == crate::ui::Shell::Panels;
+        if panels {
+            ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.content_rect(), 0, egui::Color32::BLACK);
+        } else if *home == crate::look::Skin::default() {
             background(&ctx, dark);
         } else {
             let cover = self.snap.current().filter(|_| home.wants_cover()).and_then(|t| self.covers.color(&t.thumbs));
@@ -1579,12 +1937,22 @@ impl eframe::App for MusicApp {
             crate::look::paint_on(&ctx, &painter, ctx.content_rect(), home, self.backdrops.get(surface), &now, surface.base());
         }
 
+        // Nos painéis a barra de cima é a largura toda da janela.
+        if panels {
+            egui::Panel::top("topo-paineis").exact_size(crate::ui::panels::TOP).resizable(false).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| {
+                let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing, offline: Some(&*self.offline) };
+                let top = ui.max_rect();
+                crate::ui::panels::top(ui, &mut cx, &view, &mut self.search, can_back, can_forward, &mut suggest);
+                update_badge(ui, &mut cx, top, &self.updates.state());
+            });
+        }
+        let (bar_height, bar_frame) = if panels { (bar::PANELS_HEIGHT, Frame::NONE) } else { (bar::HEIGHT, Frame::new().fill(bar::BG)) };
         egui::Panel::bottom("barra")
-            .exact_size(bar::HEIGHT)
+            .exact_size(bar_height).show_separator_line(!panels)
             .resizable(false)
-            .frame(Frame::new().fill(bar::BG))
+            .frame(bar_frame)
             .show(ui, |ui| {
-                let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
+                let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing, offline: Some(&*self.offline) };
                 let skin = &self.look.bar;
                 if *skin != crate::look::Skin::default() {
                     let cover = self.snap.current().filter(|_| skin.wants_cover()).and_then(|t| cx.covers.color(&t.thumbs));
@@ -1593,13 +1961,22 @@ impl eframe::App for MusicApp {
                     let surface = crate::look::Surface::Bar;
                     crate::look::paint(ui, ui.max_rect(), skin, self.backdrops.get(surface), &now, surface.base());
                 }
-                bar::show(ui, &mut cx, &self.snap, position, self.side, expanded, &mut self.bar);
+                if panels {
+                    bar::show_panels(ui, &mut cx, &self.snap, position, self.side, expanded, &mut self.bar);
+                } else {
+                    bar::show(ui, &mut cx, &self.snap, position, self.side, expanded, &mut self.bar);
+                }
             });
         // Aberta, a coluna se ajusta arrastando a borda direita; recolhida, é
         // fixa. Ids diferentes para a largura da recolhida não vazar para a
         // aberta na memória do painel.
         let mini = self.sidebar_mini;
-        let panel = if mini {
+        let gap = crate::ui::panels::GAP;
+        let panel = if panels && mini {
+            egui::Panel::left("biblioteca-mini").exact_size(crate::ui::panels::LIBRARY_MINI).resizable(false).show_separator_line(false)
+        } else if panels {
+            egui::Panel::left("biblioteca").default_size(crate::ui::panels::LIBRARY).size_range(crate::ui::panels::LIBRARY_RANGE).resizable(true).show_separator_line(false)
+        } else if mini {
             egui::Panel::left("navegacao-mini").exact_size(nav::SIDEBAR_MINI).resizable(false)
         } else {
             egui::Panel::left("navegacao")
@@ -1607,11 +1984,22 @@ impl eframe::App for MusicApp {
                 .size_range(nav::SIDEBAR_RANGE)
                 .resizable(true)
         };
-        let shown = panel.frame(Frame::new().fill(egui::Color32::from_black_alpha(70))).show(ui, |ui| {
-            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
-            nav::sidebar(ui, &mut cx, &view, mini);
+        let panel_frame = if panels {
+            crate::ui::panels::frame(egui::Margin { left: gap, right: gap / 2, top: 0, bottom: 0 })
+        } else {
+            Frame::new().fill(egui::Color32::from_black_alpha(70))
+        };
+        let shown = panel.frame(panel_frame).show(ui, |ui| {
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing, offline: Some(&*self.offline) };
+            if panels {
+                let tab = self.library.tab();
+                let shelf = self.pages.get(&View::Library(tab)).and_then(|s| s.page.as_deref());
+                crate::ui::panels::library(ui, &mut cx, &view, mini, &mut self.library, shelf);
+            } else {
+                nav::sidebar(ui, &mut cx, &view, mini);
+            }
         });
-        if !mini {
+        if !mini && !panels {
             self.sidebar_width = nav::sidebar_width(shown.response.rect.width());
         }
         // Com o player aberto, a fila e a letra já estão nas abas dele.
@@ -1619,10 +2007,19 @@ impl eframe::App for MusicApp {
             egui::Panel::right("lado")
                 .default_size(360.0)
                 .size_range(280.0..=520.0)
+                .show_separator_line(!panels)
                 .resizable(true)
-                .frame(Frame::new().fill(egui::Color32::from_black_alpha(110)).inner_margin(egui::Margin::symmetric(14, 0)))
+                .frame(if panels {
+                    crate::ui::panels::frame(egui::Margin { left: gap / 2, right: gap, top: 0, bottom: 0 }).inner_margin(egui::Margin::symmetric(14, 0))
+                } else {
+                    Frame::new().fill(egui::Color32::from_black_alpha(110)).inner_margin(egui::Margin::symmetric(14, 0))
+                })
                 .show(ui, |ui| {
-                    let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
+                    let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing, offline: Some(&*self.offline) };
+                    let card = ui.max_rect().expand2(vec2(14.0, 0.0));
+                    if panels && let Some(tint) = self.snap.current().and_then(|t| cx.covers.color(&t.thumbs)) {
+                        crate::ui::panels::top_glow(ui, card, tint, 300.0, 0.5);
+                    }
                     match which {
                         Side::Queue => side::queue(ui, &mut cx, &self.snap),
                         Side::Lyrics => {
@@ -1630,14 +2027,39 @@ impl eframe::App for MusicApp {
                             side::lyrics(ui, &mut cx, &self.snap, state, position);
                         }
                     }
+                    if panels {
+                        crate::ui::panels::round_corners(ui, card);
+                    }
                 });
         }
-        egui::CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
-            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
-            let (top, _) = ui.allocate_exact_size(vec2(ui.available_width(), nav::TOP), Sense::hover());
-            let mut top_ui = ui.new_child(egui::UiBuilder::new().max_rect(top));
-            nav::top(&mut top_ui, &mut cx, &mut self.search, can_back, can_forward, &mut suggest);
-            update_badge(&mut top_ui, &mut cx, top, &self.updates.state());
+        let side_shown = self.side.is_some() && !expanded;
+        let central = if panels {
+            crate::ui::panels::frame(egui::Margin { left: gap / 2, right: if side_shown { gap / 2 } else { gap }, top: 0, bottom: 0 })
+        } else {
+            Frame::NONE
+        };
+        egui::CentralPanel::default().frame(central).show(ui, |ui| {
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing, offline: Some(&*self.offline) };
+            let panel_rect = ui.max_rect();
+            if panels {
+                // A tela principal personalizada fica dentro do painel.
+                let home = &self.look.home;
+                if *home != crate::look::Skin::default() {
+                    let cover = self.snap.current().filter(|_| home.wants_cover()).and_then(|t| cx.covers.color(&t.thumbs));
+                    let now = crate::look::Now { cover, sound: home.viz.map(|_| (&self.analyzer.bands, &self.analyzer.wave)) };
+                    let surface = crate::look::Surface::Home;
+                    crate::look::paint(ui, panel_rect, home, self.backdrops.get(surface), &now, surface.base());
+                } else if view != View::Downloads && self.pages.get(&view).and_then(|s| s.page.as_ref()).is_none_or(|p| p.header.is_none()) {
+                    // As páginas com capa têm a cor dela no próprio cabeçalho.
+                    let tint = self.snap.current().and_then(|t| cx.covers.color(&t.thumbs));
+                    crate::ui::panels::page_glow(ui, panel_rect, tint);
+                }
+            } else {
+                let (top, _) = ui.allocate_exact_size(vec2(ui.available_width(), nav::TOP), Sense::hover());
+                let mut top_ui = ui.new_child(egui::UiBuilder::new().max_rect(top));
+                nav::top(&mut top_ui, &mut cx, &mut self.search, can_back, can_forward, &mut suggest);
+                update_badge(&mut top_ui, &mut cx, top, &self.updates.state());
+            }
             // O player sobe de baixo por cima da página ao abrir, e desce ao
             // fechar; parado aberto, a página nem é desenhada.
             let shown = ctx.animate_bool_with_time_and_easing(egui::Id::new("player-aberto"), expanded, 0.3, egui::emath::easing::cubic_out);
@@ -1645,6 +2067,9 @@ impl eframe::App for MusicApp {
             if shown < 1.0 {
                 let mut page_ui = ui.new_child(egui::UiBuilder::new().max_rect(rest));
                 let ui = &mut page_ui;
+                if panels && matches!(view, View::Search { .. } | View::Library(_)) {
+                    ui.add_space(12.0);
+                }
                 if let View::Search { query, filter } = &view {
                     ui.add_space(4.0);
                     nav::filters(ui, &mut cx, query, *filter);
@@ -1655,7 +2080,10 @@ impl eframe::App for MusicApp {
                     nav::library_tabs(ui, &mut cx, *tab);
                     ui.add_space(4.0);
                 }
-                if view.needs_account() && !self.me.signed_in {
+                if view == View::Downloads {
+                    let dir = self.offline.dir();
+                    crate::ui::downloads::show(ui, &mut cx, &self.download_tracks.1, &dir, self.offline.has_chosen_dir(), &mut self.downloads_page);
+                } else if view.needs_account() && !self.me.signed_in {
                     sign_in_prompt(ui, &mut cx);
                 } else {
                     let empty = PageState::default();
@@ -1676,10 +2104,13 @@ impl eframe::App for MusicApp {
                 let id = current.clone().unwrap_or_default();
                 player::show(&mut sheet_ui, &mut cx, &self.snap, position, &mut self.player_tab, self.lyrics.get(&id), self.related.get(&id));
             }
+            if panels {
+                crate::ui::panels::round_corners(ui, panel_rect);
+            }
         });
 
         if let Some(open) = self.dialog.as_mut() {
-            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing };
+            let mut cx = Cx { covers: &mut self.covers, actions: &mut actions, me: &self.me, language: self.language, latency, translate_lyrics: self.translate_lyrics, lyrics_style: &self.look.lyrics, current: current.clone(), playing, offline: Some(&*self.offline) };
             // As miniaturas mostram a capa e o som de agora.
             let cover = self.snap.current().and_then(|t| cx.covers.color(&t.thumbs));
             let now = crate::look::Now { cover, sound: Some((&self.analyzer.bands, &self.analyzer.wave)) };
@@ -1700,6 +2131,15 @@ impl eframe::App for MusicApp {
         if playing || self.snap.status == Status::Loading {
             // O tempo anda: um quadro a cada quarto de segundo basta.
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // O arrasto do arquivo terminou dentro do laço do Windows, que ficou
+        // com o soltar do botão: sem este aviso o egui seguiria arrastando.
+        if std::mem::take(&mut self.release_pointer) {
+            let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default();
+            raw_input.events.push(egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
         }
     }
 

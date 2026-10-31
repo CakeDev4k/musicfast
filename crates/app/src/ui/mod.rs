@@ -4,6 +4,7 @@
 
 pub mod bar;
 pub mod dialog;
+pub mod downloads;
 mod icon_data;
 pub mod icons;
 pub mod kit;
@@ -11,6 +12,7 @@ pub mod lyrics_view;
 pub mod mini;
 pub mod nav;
 pub mod page;
+pub mod panels;
 pub mod player;
 pub mod side;
 pub mod theme;
@@ -25,9 +27,20 @@ use musicfast_ytm::{Account, Card, LikeStatus, Page, Play, SearchFilter, Track};
 use crate::covers::Covers;
 pub use dialog::Dialog;
 
+/// A organização da janela inteira, escolhida no menu da conta.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Shell {
+    /// Coluna, barra de cima e página sobre o degradê.
+    #[default]
+    Classic,
+    /// Painéis arredondados sobre o preto (`panels`).
+    Panels,
+}
+
 /// As abas da biblioteca, cada uma uma página da conta.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LibraryTab {
+    #[default]
     Playlists,
     Songs,
     Albums,
@@ -70,6 +83,8 @@ pub enum View {
     Library(LibraryTab),
     Search { query: String, filter: SearchFilter },
     Browse { id: String, params: Option<String> },
+    /// As músicas baixadas, que tocam sem internet (`Offline`).
+    Downloads,
 }
 
 impl View {
@@ -130,11 +145,20 @@ pub struct Me {
     pub likes: HashMap<String, LikeStatus>,
     pub subscribed: HashMap<String, bool>,
     pub saved: HashMap<String, bool>,
+    /// As contas guardadas e a aberta, mesmo com a sessão vencida.
+    pub accounts: Vec<crate::accounts::Profile>,
+    pub active: Option<String>,
 }
 
 impl Me {
     pub fn like(&self, video_id: &str) -> LikeStatus {
         self.likes.get(video_id).copied().unwrap_or_default()
+    }
+
+    /// As outras contas, para trocar com um clique.
+    pub fn other_accounts(&self) -> impl Iterator<Item = &crate::accounts::Profile> {
+        let active = self.active.as_deref().filter(|_| self.signed_in);
+        self.accounts.iter().filter(move |p| Some(p.id.as_str()) != active)
     }
 
     /// As playlists em que dá para pôr música (sem as automáticas).
@@ -163,6 +187,10 @@ pub enum Action {
     Mini(bool),
     SignIn,
     SignOut,
+    /// Entrar em mais uma conta, sem sair da aberta.
+    AddAccount,
+    /// Trocar para outra conta guardada (`Profile::id`).
+    SwitchAccount(String),
     Dialog(Dialog),
     /// Abrir "Armazenamento e cache" (e medir o cache).
     Storage,
@@ -177,6 +205,10 @@ pub enum Action {
     SubmitCookies(String),
     /// Fechar e deixar o ajudante instalar a versão nova já baixada.
     RestartToUpdate,
+    /// Trocar a organização da janela.
+    SetShell(Shell),
+    /// Buscar uma aba da biblioteca sem sair da página aberta.
+    LoadLibrary(LibraryTab),
     /// Trocar o idioma (`None`: o do sistema).
     SetLanguage(Option<Lang>),
     /// Ligar ou desligar a tradução da letra.
@@ -191,6 +223,30 @@ pub enum Action {
     PickBackdropFile(crate::look::Surface),
     /// O fundo do player escolhido.
     SetLook(crate::look::Look),
+    /// Abrir o editor dos botões da barra.
+    CustomizeBar,
+    /// Os botões escolhidos no editor.
+    SetBar(crate::bar_layout::Layouts),
+    /// Ligar ou desligar a música no perfil do Discord.
+    ToggleDiscord,
+    /// O que o editor de botões mudou no Discord.
+    SetDiscord(crate::discord::Settings),
+    /// Baixar a música para ouvir sem internet (ou tentar de novo).
+    Download(Track),
+    /// Apagar a música baixada (`video_id`).
+    DeleteDownload(String),
+    /// Copiar o link da música (`video_id`).
+    CopyLink(String),
+    /// Arrastar o arquivo baixado para fora do app (o botão segue apertado).
+    DragOut(std::path::PathBuf),
+    /// Mostrar o arquivo na pasta.
+    Reveal(std::path::PathBuf),
+    /// Abrir a pasta das baixadas.
+    OpenDownloads,
+    /// Escolher no computador a pasta dos próximos downloads.
+    PickDownloadsFolder,
+    /// Voltar a baixar na pasta do app.
+    ResetDownloadsFolder,
 }
 
 /// O que as telas recebem para desenhar.
@@ -210,11 +266,21 @@ pub struct Cx<'a> {
     /// O `video_id` da música atual, e se está tocando.
     pub current: Option<String>,
     pub playing: bool,
+    /// As músicas baixadas (`None` no `--medir`).
+    pub offline: Option<&'a musicfast_player::Offline>,
 }
 
 impl Cx<'_> {
     pub fn act(&mut self, action: Action) {
         self.actions.push(action);
+    }
+
+    /// Onde está o download da música.
+    pub fn download(&self, video_id: &str) -> musicfast_player::offline::State {
+        match self.offline {
+            Some(o) => o.state(video_id),
+            None => musicfast_player::offline::State::None,
+        }
     }
 }
 

@@ -159,6 +159,8 @@ pub struct Look {
     pub home: Skin,
     /// O estilo da letra, o mesmo em todas as telas.
     pub lyrics: LyricsStyle,
+    /// O tamanho do mini player e a ordem dos botões dele.
+    pub mini_layout: MiniLayout,
 }
 
 impl Look {
@@ -177,6 +179,103 @@ impl Look {
             Surface::Bar => &mut self.bar,
             Surface::Mini => &mut self.mini,
             Surface::Home => &mut self.home,
+        }
+    }
+}
+
+/// Um botão do mini player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MiniButton {
+    Lyrics,
+    Previous,
+    Play,
+    Next,
+    Expand,
+}
+
+impl MiniButton {
+    /// A ordem de sempre, da esquerda para a direita.
+    pub const ALL: [Self; 5] = [Self::Lyrics, Self::Previous, Self::Play, Self::Next, Self::Expand];
+
+    /// Tocar e voltar à janela inteira ficam sempre à mostra.
+    pub fn can_hide(self) -> bool {
+        !matches!(self, Self::Play | Self::Expand)
+    }
+
+    pub fn label(self) -> &'static str {
+        let t = musicfast_i18n::t();
+        match self {
+            Self::Lyrics => t.look_section_lyrics,
+            Self::Previous => t.previous,
+            Self::Play => t.play,
+            Self::Next => t.next,
+            Self::Expand => t.back_to_window,
+        }
+    }
+}
+
+/// O mini player: o tamanho (uma escala de tudo nele), a ordem dos botões
+/// e os que estão escondidos.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MiniLayout {
+    pub scale: f32,
+    /// Da esquerda para a direita.
+    pub order: Vec<MiniButton>,
+    pub hidden: Vec<MiniButton>,
+    /// A linha entre a letra e os botões.
+    pub lyrics_divider: bool,
+}
+
+impl Default for MiniLayout {
+    fn default() -> Self {
+        Self { scale: 1.0, order: MiniButton::ALL.to_vec(), hidden: Vec::new(), lyrics_divider: true }
+    }
+}
+
+impl MiniLayout {
+    pub const SCALE: std::ops::RangeInclusive<f32> = 0.8..=1.4;
+
+    pub fn scale(&self) -> f32 {
+        if self.scale.is_finite() { self.scale.clamp(*Self::SCALE.start(), *Self::SCALE.end()) } else { 1.0 }
+    }
+
+    /// Todos os botões, uma vez cada, na ordem escolhida (o que faltar no
+    /// arquivo entra no fim).
+    pub fn order(&self) -> Vec<MiniButton> {
+        let mut out: Vec<MiniButton> = Vec::with_capacity(MiniButton::ALL.len());
+        for b in self.order.iter().chain(MiniButton::ALL.iter()) {
+            if !out.contains(b) {
+                out.push(*b);
+            }
+        }
+        out
+    }
+
+    pub fn is_hidden(&self, b: MiniButton) -> bool {
+        b.can_hide() && self.hidden.contains(&b)
+    }
+
+    /// Os botões à mostra, da esquerda para a direita.
+    pub fn visible(&self) -> Vec<MiniButton> {
+        self.order().into_iter().filter(|b| !self.is_hidden(*b)).collect()
+    }
+
+    /// Troca a ordem dos que estão à mostra; os escondidos ficam onde estavam.
+    pub fn set_visible_order(&mut self, visible: &[MiniButton]) {
+        let mut next = visible.iter();
+        self.order = self.order().into_iter().map(|b| if self.is_hidden(b) { b } else { *next.next().unwrap_or(&b) }).collect();
+    }
+
+    pub fn toggle_hidden(&mut self, b: MiniButton) {
+        if !b.can_hide() {
+            return;
+        }
+        if let Some(i) = self.hidden.iter().position(|h| *h == b) {
+            self.hidden.remove(i);
+        } else {
+            self.hidden.push(b);
         }
     }
 }
@@ -201,6 +300,8 @@ pub struct LyricsStyle {
     /// O brilho das outras linhas (0,1 a 0,7).
     pub dim: f32,
     pub romaji: bool,
+    /// Os botões do canto (tradução, estilo, outra letra) com o mouse em cima.
+    pub hover_buttons: bool,
     pub translation: TranslationMode,
     /// O idioma da tradução ("pt", "en"); `None`, o do app.
     pub translation_lang: Option<String>,
@@ -221,6 +322,7 @@ impl Default for LyricsStyle {
             blur: 0.0,
             dim: 0.32,
             romaji: true,
+            hover_buttons: true,
             translation: TranslationMode::Below,
             translation_lang: None,
             translation_color: [170, 200, 255],
@@ -954,6 +1056,21 @@ fn cover_fill(painter: &Painter, rect: Rect, texture: &TextureHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mini_layout_reorders_around_hidden_buttons() {
+        use MiniButton::*;
+        // Um arquivo antigo ou mexido: repetido e faltando botões.
+        let mut l = MiniLayout { scale: 9.0, order: vec![Next, Next, Play], hidden: vec![Play, Lyrics], ..MiniLayout::default() };
+        assert_eq!(l.scale(), 1.4);
+        assert_eq!(l.order(), vec![Next, Play, Lyrics, Previous, Expand]);
+        // Tocar não se esconde.
+        assert_eq!(l.visible(), vec![Next, Play, Previous, Expand]);
+        l.set_visible_order(&[Expand, Play, Previous, Next]);
+        assert_eq!(l.order(), vec![Expand, Play, Lyrics, Previous, Next]);
+        l.toggle_hidden(Lyrics);
+        assert_eq!(l.visible(), vec![Expand, Play, Lyrics, Previous, Next]);
+    }
 
     #[test]
     fn gif_keeps_every_frame_and_its_delay() {

@@ -255,13 +255,22 @@ fn worker(queue: &Queue, tx: &Sender<(u64, Option<(ColorImage, Color32)>)>, http
     }
 }
 
-fn fetch(http: &reqwest::blocking::Client, request: &Request) -> Result<(ColorImage, Color32), String> {
-    let bytes = http
-        .get(&request.url)
+/// Os bytes de uma capa: da internet, ou do disco quando é a de uma música
+/// baixada (`musicfast_player::offline::LOCAL_PREFIX`).
+pub fn read(http: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
+    if let Some(path) = url.strip_prefix(musicfast_player::offline::LOCAL_PREFIX) {
+        return std::fs::read(path).map_err(|e| e.to_string());
+    }
+    http.get(url)
         .send()
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.bytes())
-        .map_err(|e| e.to_string())?;
+        .map(|b| b.to_vec())
+        .map_err(|e| e.to_string())
+}
+
+fn fetch(http: &reqwest::blocking::Client, request: &Request) -> Result<(ColorImage, Color32), String> {
+    let bytes = read(http, &request.url)?;
     let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
     let rgba = fit_square(img, request.px).to_rgba8();
     let color = vivid_average(rgba.as_raw());

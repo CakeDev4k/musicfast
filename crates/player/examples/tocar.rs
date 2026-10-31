@@ -42,6 +42,7 @@ fn main() {
             cache_file: scratch.join("enderecos.json"),
             client,
             volume: 0.0,
+            offline: None,
         },
         Arc::new(|| {}),
     );

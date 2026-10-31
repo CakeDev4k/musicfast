@@ -40,6 +40,17 @@ pub struct Saved {
     pub look: crate::look::Look,
     /// A tradução da letra embaixo de cada linha (quando ela é de outro idioma).
     pub translate_lyrics: bool,
+    /// A pasta escolhida para as músicas baixadas (`None`: a do app).
+    pub downloads_dir: Option<PathBuf>,
+    /// A organização da janela.
+    pub shell: crate::ui::Shell,
+    /// As contas guardadas e a que está aberta (`accounts`).
+    pub accounts: Vec<crate::accounts::Profile>,
+    pub active_account: Option<String>,
+    /// Os botões da barra do player.
+    pub bar: crate::bar_layout::Layouts,
+    /// A música no perfil do Discord.
+    pub discord: crate::discord::Settings,
 }
 
 /// Posição e tamanho da janela, em pontos.
@@ -93,6 +104,12 @@ impl Default for Saved {
             language: None,
             look: crate::look::Look::default(),
             translate_lyrics: true,
+            downloads_dir: None,
+            shell: crate::ui::Shell::default(),
+            accounts: Vec::new(),
+            active_account: None,
+            bar: crate::bar_layout::Layouts::default(),
+            discord: crate::discord::Settings::default(),
         }
     }
 }

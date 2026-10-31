@@ -33,20 +33,28 @@ fn login_url(hl: &str) -> String {
 const PREFIX: &str = "musicfast-cookies\t";
 
 pub const SILENT: &str = "--silencioso";
+/// O perfil da conta que a janela abre (uma conta, um perfil).
+const PROFILE_ENV: &str = "MUSICFAST_PERFIL";
+
+/// No processo `--entrar`: o perfil pedido, ou o de sempre.
+pub fn profile_from_env(default: PathBuf) -> PathBuf {
+    std::env::var_os(PROFILE_ENV).map_or(default, PathBuf::from)
+}
 /// A renovação silenciosa desiste depois disso.
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 const SILENT_LIMIT: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// No processo principal: abre a janela de login e espera. `Ok(None)` é a
 /// pessoa ter fechado a janela (ou, `silent`, o perfil não ter mais sessão).
-pub fn sign_in(silent: bool) -> Result<Option<String>, String> {
+pub fn sign_in(silent: bool, profile: &Path) -> Result<Option<String>, String> {
     // Com a janela ainda fechada, o cache do navegador pode sair sem risco.
-    crate::storage::trim_browser(&crate::paths::Paths::new().webview);
+    crate::storage::trim_browser(profile);
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
     cmd.arg("--entrar");
     // A janela é outro processo: recebe o idioma que o app está usando.
     cmd.env(musicfast_i18n::ENV, musicfast_i18n::current().code());
+    cmd.env(PROFILE_ENV, profile);
     if silent {
         cmd.arg(SILENT);
     }

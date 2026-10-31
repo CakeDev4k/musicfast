@@ -227,7 +227,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, song: &Song, key: &str, position: f64, big
         }
         animating = true;
     }
-    if ui.rect_contains_pointer(area) {
+    if cx.lyrics_style.hover_buttons && ui.rect_contains_pointer(area) {
         corner(ui, cx, area, key, song);
     }
     if let Some(at) = seek {

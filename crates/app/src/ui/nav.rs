@@ -8,7 +8,7 @@ use musicfast_ytm::SearchFilter;
 use super::icons;
 use super::kit;
 use super::theme;
-use super::{Action, Cx, LibraryTab, View};
+use super::{Action, Cx, LibraryTab, Shell, View};
 
 pub const SIDEBAR: f32 = 220.0;
 /// Até onde a coluna aberta estica ou encolhe ao arrastar a borda.
@@ -53,16 +53,18 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
         if !mini {
             ui.add_space(4.0);
             let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-            ui.painter().circle_filled(r.center(), 14.0, theme::ACCENT);
+            ui.painter().circle_filled(r.center(), 14.0, theme::accent());
             icons::paint_filled(ui.painter(), r.shrink(8.0).translate(vec2(1.0, 0.0)), icons::PLAY, theme::TEXT);
             ui.label(egui::RichText::new("MusicFast").font(theme::bold(19.0)));
         }
     });
     ui.add_space(if mini { 12.0 } else { 16.0 });
-    let entries: [(icons::Icon, &str, View); 3] = [
+    let entries: [(icons::Icon, &str, View); 4] = [
         (icons::HOUSE, t().home, View::Home),
         (icons::COMPASS, t().explore, View::Explore),
         (icons::LIBRARY, t().library, View::Library(LibraryTab::Playlists)),
+        // Sem conta e sem internet também: as músicas estão no disco.
+        (icons::DOWNLOAD, t().downloads, View::Downloads),
     ];
     for (icon, label, target) in entries {
         let selected = match (&target, view) {
@@ -123,52 +125,7 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
         // Sem conta, o convite do site no lugar das playlists.
         ui.horizontal(|ui| {
             ui.add_space(20.0);
-            ui.vertical(|ui| {
-                ui.set_max_width(ui.available_width() - 20.0);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(t().sign_in_invite)
-                            .color(theme::TEXT_DIM)
-                            .font(theme::regular(13.0)),
-                    )
-                    .wrap(),
-                );
-                ui.add_space(10.0);
-                let label = if cx.me.signing_in { t().signing_in } else { t().sign_in };
-                if kit::pill(ui, Some(icons::LOG_IN), label, false).clicked() && !cx.me.signing_in {
-                    cx.act(Action::SignIn);
-                }
-                ui.add_space(6.0);
-                // Para quando o Google recusar a janela embutida.
-                let alt = ui
-                    .add(
-                        egui::Label::new(egui::RichText::new(t().sign_in_with_cookies).color(theme::TEXT_FAINT).font(theme::regular(12.0)))
-                            .sense(Sense::click()),
-                    )
-                    .on_hover_cursor(CursorIcon::PointingHand);
-                if alt.clicked() {
-                    cx.act(Action::Dialog(super::Dialog::Cookies { text: String::new(), error: None }));
-                }
-                // Sem conta não há o menu da foto: o idioma fica aqui.
-                ui.add_space(14.0);
-                let text = format!("{}: {}", t().language, language_label(cx.language));
-                let r = ui
-                    .horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                        icons::paint(ui.painter(), r, icons::GLOBE, theme::TEXT_FAINT);
-                        ui.add(egui::Label::new(egui::RichText::new(text).color(theme::TEXT_FAINT).font(theme::regular(12.0))).sense(Sense::click()))
-                    })
-                    .inner
-                    .on_hover_cursor(CursorIcon::PointingHand);
-                egui::Popup::menu(&r).width(LANGUAGE_W).show(|ui| {
-                    ui.set_width(LANGUAGE_W);
-                    for choice in LANGUAGES {
-                        if language_choice(ui, cx, choice, LANGUAGE_W) {
-                            ui.close();
-                        }
-                    }
-                });
-            });
+            sign_in_invite(ui, cx);
         });
         return;
     }
@@ -215,9 +172,70 @@ pub fn sidebar(ui: &mut Ui, cx: &mut Cx, view: &View, mini: bool) {
     });
 }
 
+/// O convite para entrar, com o idioma e a interface (sem conta não há o
+/// menu da foto).
+pub(super) fn sign_in_invite(ui: &mut Ui, cx: &mut Cx) {
+    ui.vertical(|ui| {
+        ui.set_max_width(ui.available_width() - 20.0);
+        ui.add(egui::Label::new(egui::RichText::new(t().sign_in_invite).color(theme::TEXT_DIM).font(theme::regular(13.0))).wrap());
+        ui.add_space(10.0);
+        let label = if cx.me.signing_in { t().signing_in } else { t().sign_in };
+        if kit::pill(ui, Some(icons::LOG_IN), label, false).clicked() && !cx.me.signing_in {
+            cx.act(Action::SignIn);
+        }
+        ui.add_space(6.0);
+        // Para quando o Google recusar a janela embutida.
+        let alt = ui
+            .add(egui::Label::new(egui::RichText::new(t().sign_in_with_cookies).color(theme::TEXT_FAINT).font(theme::regular(12.0))).sense(Sense::click()))
+            .on_hover_cursor(CursorIcon::PointingHand);
+        if alt.clicked() {
+            cx.act(Action::Dialog(super::Dialog::Cookies { text: String::new(), error: None }));
+        }
+        ui.add_space(14.0);
+        let text = format!("{}: {}", t().language, language_label(cx.language));
+        let r = ui
+            .horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                icons::paint(ui.painter(), r, icons::GLOBE, theme::TEXT_FAINT);
+                ui.add(egui::Label::new(egui::RichText::new(text).color(theme::TEXT_FAINT).font(theme::regular(12.0))).sense(Sense::click()))
+            })
+            .inner
+            .on_hover_cursor(CursorIcon::PointingHand);
+        egui::Popup::menu(&r).width(LANGUAGE_W).show(|ui| {
+            ui.set_width(LANGUAGE_W);
+            for choice in LANGUAGES {
+                if language_choice(ui, cx, choice, LANGUAGE_W) {
+                    ui.close();
+                }
+            }
+        });
+        let shell = ui
+            .horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                icons::paint(ui.painter(), r, icons::PALETTE, theme::TEXT_FAINT);
+                ui.add(egui::Label::new(egui::RichText::new(shell_label()).color(theme::TEXT_FAINT).font(theme::regular(12.0))).sense(Sense::click()))
+            })
+            .inner
+            .on_hover_cursor(CursorIcon::PointingHand);
+        if shell.clicked() {
+            cx.act(Action::SetShell(other_shell()));
+        }
+    });
+}
+
+/// "Interface: Painéis".
+fn shell_label() -> String {
+    let name = if theme::panels() { t().interface_panels } else { t().interface_classic };
+    format!("{}: {name}", t().interface)
+}
+
+fn other_shell() -> Shell {
+    if theme::panels() { Shell::Classic } else { Shell::Panels }
+}
+
 /// O canto direito da barra de cima: a foto da conta (com o menu) ou o
 /// "Fazer login".
-fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
+pub(super) fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
     let cy = rect.center().y;
     if !cx.me.signed_in {
         let w = 128.0;
@@ -225,8 +243,17 @@ fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
         let label = if cx.me.signing_in { t().signing_in } else { t().sign_in };
         let r = kit::pill(&mut child, None, label, true);
-        if r.clicked() && !cx.me.signing_in {
-            cx.act(Action::SignIn);
+        if cx.me.accounts.is_empty() {
+            if r.clicked() && !cx.me.signing_in {
+                cx.act(Action::SignIn);
+            }
+        } else {
+            // Já há contas guardadas: entrar é escolher uma delas.
+            egui::Popup::menu(&r).align(egui::RectAlign::BOTTOM_END).gap(8.0).width(MENU_W).show(|ui| {
+                ui.set_width(MENU_W);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                account_rows(ui, cx);
+            });
         }
         // Plano B, pelo botão direito: colar os cookies do navegador.
         r.context_menu(|ui| {
@@ -244,9 +271,23 @@ fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
     match &cx.me.account {
         Some(account) if !account.photo.is_empty() => cx.covers.paint(ui, avatar, &account.photo, 18),
         other => {
-            ui.painter().circle_filled(avatar.center(), 18.0, theme::ACCENT);
+            ui.painter().circle_filled(avatar.center(), 18.0, theme::accent());
             let initial = other.as_ref().and_then(|a| a.name.chars().next()).unwrap_or('?').to_uppercase().to_string();
             ui.painter().text(avatar.center(), Align2::CENTER_CENTER, initial, theme::semibold(16.0), theme::TEXT);
+        }
+    }
+    // As outras contas ao lado da foto: um clique troca.
+    let me = cx.me;
+    for (i, profile) in me.other_accounts().take(quick_accounts(me, rect.width())).enumerate() {
+        let center = avatar.center() - vec2(44.0 + QUICK_STEP * i as f32, 0.0);
+        let r = Rect::from_center_size(center, vec2(QUICK_SIDE, QUICK_SIDE));
+        let quick = ui.interact(r, Id::new(("conta-rapida", &profile.id)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        profile_photo(ui, cx, r, profile);
+        if quick.hovered() {
+            ui.painter().circle_stroke(center, QUICK_SIDE / 2.0 + 1.5, egui::Stroke::new(2.0, theme::TEXT));
+        }
+        if quick.on_hover_text(t().switch_to(profile_name(profile))).clicked() {
+            cx.act(Action::SwitchAccount(profile.id.clone()));
         }
     }
     // O menu da conta, como o do site: largura fixa, preso à direita da
@@ -269,6 +310,8 @@ fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
                 account_header(ui, cx, account);
                 menu_divider(ui);
             }
+            account_rows(ui, cx);
+            menu_divider(ui);
             for (icon, label, target) in [
                 (icons::LIBRARY, t().your_library, View::Library(LibraryTab::Playlists)),
                 (icons::THUMBS_UP, t().liked_songs, View::browse("VLLM", None)),
@@ -280,6 +323,12 @@ fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
             }
             menu_divider(ui);
             language_rows(ui, cx);
+            if menu_row(ui, icons::PALETTE, &shell_label()) {
+                cx.act(Action::SetShell(other_shell()));
+            }
+            if menu_row(ui, icons::PANEL_BOTTOM, t().bar_buttons) {
+                cx.act(Action::CustomizeBar);
+            }
             if menu_row(ui, icons::TRASH_2, t().storage) {
                 cx.act(Action::Storage);
             }
@@ -291,13 +340,73 @@ fn account(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
 }
 
 const MENU_W: f32 = 300.0;
+/// As fotinhas das outras contas na barra de cima.
+const QUICK_MAX: usize = 3;
+const QUICK_SIDE: f32 = 28.0;
+const QUICK_STEP: f32 = 34.0;
+
+/// Quantas fotinhas cabem sem encostar na busca.
+fn quick_accounts(me: &super::Me, width: f32) -> usize {
+    if width < 1000.0 { 0 } else { me.other_accounts().count().min(QUICK_MAX) }
+}
+
+/// A largura que as fotinhas ocupam, para o aviso de atualização não ir para
+/// cima delas.
+pub fn quick_accounts_width(me: &super::Me, width: f32) -> f32 {
+    quick_accounts(me, width) as f32 * QUICK_STEP
+}
+
+fn profile_name(profile: &crate::accounts::Profile) -> &str {
+    if profile.name.is_empty() { &profile.handle } else { &profile.name }
+}
+
+/// A foto da conta, ou a inicial sobre a cor de destaque.
+fn profile_photo(ui: &Ui, cx: &mut Cx, rect: Rect, profile: &crate::accounts::Profile) {
+    let radius = rect.width() / 2.0;
+    if profile.photo.is_empty() {
+        ui.painter().circle_filled(rect.center(), radius, theme::accent());
+        let initial = profile_name(profile).chars().next().unwrap_or('?').to_uppercase().to_string();
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, initial, theme::semibold(radius), theme::TEXT);
+    } else {
+        cx.covers.paint(ui, rect, &profile.photo, radius as u8);
+    }
+}
+
+/// As outras contas, cada linha um clique, e "Adicionar outra conta".
+fn account_rows(ui: &mut Ui, cx: &mut Cx) {
+    let me = cx.me;
+    for profile in me.other_accounts() {
+        let (rect, response) = ui.allocate_exact_size(vec2(MENU_W, 52.0), Sense::click());
+        if response.hovered() {
+            ui.painter().rect_filled(rect, CornerRadius::ZERO, theme::MENU_HOVER);
+        }
+        let photo = Rect::from_center_size(pos2(rect.left() + 34.0, rect.center().y), vec2(36.0, 36.0));
+        profile_photo(ui, cx, photo, profile);
+        let x = photo.right() + 14.0;
+        let w = rect.right() - x - 16.0;
+        let name = kit::one_line(ui, profile_name(profile), theme::medium(14.5), theme::TEXT, w);
+        let name_y = if profile.handle.is_empty() { rect.center().y - name.size().y / 2.0 } else { rect.center().y - 19.0 };
+        ui.painter().galley(pos2(x, name_y), name, theme::TEXT);
+        if !profile.handle.is_empty() {
+            let handle = kit::one_line(ui, &profile.handle, theme::regular(12.5), theme::TEXT_DIM, w);
+            ui.painter().galley(pos2(x, rect.center().y + 2.0), handle, theme::TEXT_DIM);
+        }
+        if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            cx.act(Action::SwitchAccount(profile.id.clone()));
+            ui.close();
+        }
+    }
+    if menu_row(ui, icons::PLUS, t().add_account) && !cx.me.signing_in {
+        cx.act(Action::AddAccount);
+    }
+}
 
 /// A foto, o nome, o @ e o atalho para a conta Google.
 fn account_header(ui: &mut Ui, cx: &mut Cx, account: &musicfast_ytm::Account) {
     let (rect, _) = ui.allocate_exact_size(vec2(MENU_W, 76.0), Sense::hover());
     let avatar = Rect::from_min_size(pos2(rect.left() + 16.0, rect.top() + 8.0), vec2(44.0, 44.0));
     if account.photo.is_empty() {
-        ui.painter().circle_filled(avatar.center(), 22.0, theme::ACCENT);
+        ui.painter().circle_filled(avatar.center(), 22.0, theme::accent());
         let initial = account.name.chars().next().unwrap_or('?').to_uppercase().to_string();
         ui.painter().text(avatar.center(), Align2::CENTER_CENTER, initial, theme::semibold(18.0), theme::TEXT);
     } else {
@@ -436,10 +545,17 @@ pub fn top(ui: &mut Ui, cx: &mut Cx, search: &mut SearchBox, can_back: bool, can
     let width = (rect.width() - 320.0).clamp(220.0, 560.0);
     let field = Rect::from_center_size(pos2((x + rect.right()) / 2.0 - 20.0, cy), vec2(width, 42.0));
     let field = field.translate(vec2((x + 12.0 - field.left()).max(0.0), 0.0));
-    ui.painter().rect(field, CornerRadius::same(theme::RADIUS), theme::GLASS, egui::Stroke::new(1.0, theme::GLASS_HOVER), egui::StrokeKind::Inside);
+    search_field(ui, cx, search, field, theme::RADIUS, 40.0, suggest);
+}
+
+/// A caixa de busca com as sugestões, em `field`. `trailing`: o que fica
+/// livre à direita do texto (o "limpar", e o que quem chama puser ali).
+pub(super) fn search_field(ui: &mut Ui, cx: &mut Cx, search: &mut SearchBox, field: Rect, radius: u8, trailing: f32, suggest: &mut Option<String>) {
+    let cy = field.center().y;
+    ui.painter().rect(field, CornerRadius::same(radius), theme::GLASS, egui::Stroke::new(1.0, theme::GLASS_HOVER), egui::StrokeKind::Inside);
     let icon_rect = Rect::from_center_size(pos2(field.left() + 22.0, cy), vec2(20.0, 20.0));
     icons::paint(ui.painter(), icon_rect, icons::SEARCH, theme::TEXT_DIM);
-    let edit_rect = Rect::from_min_max(pos2(field.left() + 42.0, field.top()), pos2(field.right() - 40.0, field.bottom()));
+    let edit_rect = Rect::from_min_max(pos2(field.left() + 42.0, field.top()), pos2(field.right() - trailing, field.bottom()));
     let edit_id = Id::new("busca");
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(edit_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
     let had_focus = child.memory(|m| m.has_focus(edit_id));
@@ -505,7 +621,7 @@ pub fn top(ui: &mut Ui, cx: &mut Cx, search: &mut SearchBox, can_back: bool, can
         };
     }
     if !search.text.is_empty() {
-        let clear = Rect::from_center_size(pos2(field.right() - 22.0, cy), vec2(30.0, 30.0));
+        let clear = Rect::from_center_size(pos2(field.right() - trailing + 18.0, cy), vec2(30.0, 30.0));
         let r = ui.interact(clear, Id::new("limpar-busca"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
         kit::paint_icon_button(ui, clear, &r, icons::X, theme::TEXT_DIM);
         if r.clicked() {
