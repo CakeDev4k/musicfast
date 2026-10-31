@@ -1714,6 +1714,28 @@ fn window_handle(frame: &eframe::Frame) -> Option<isize> {
     }
 }
 
+/// A barra de título preta como o app, com a janela em foco ou não e seja
+/// qual for o tema do sistema. O Windows 10 ignora a cor e fica no modo escuro.
+#[cfg(windows)]
+fn dark_title_bar(hwnd: isize) {
+    use crate::ui::theme;
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+    // O DWM lê a cor como 0x00BBGGRR.
+    let colorref = |c: egui::Color32| u32::from(c.r()) | u32::from(c.g()) << 8 | u32::from(c.b()) << 16;
+    let attributes = [
+        (DWMWA_USE_IMMERSIVE_DARK_MODE as u32, 1),
+        (DWMWA_CAPTION_COLOR as u32, colorref(theme::BG)),
+        (DWMWA_TEXT_COLOR as u32, colorref(theme::TEXT)),
+    ];
+    for (attribute, value) in attributes {
+        // SAFETY: o HWND é o da janela viva deste quadro, e cada atributo é
+        // um inteiro de 4 bytes, como o DWM pede.
+        unsafe {
+            DwmSetWindowAttribute(hwnd as _, attribute, (&value as *const u32).cast(), std::mem::size_of::<u32>() as u32);
+        }
+    }
+}
+
 /// Cantos redondos (o mini player) ou os do sistema, pelo DWM do Windows 11.
 /// Noutros sistemas, e no Windows 10, não faz nada.
 fn round_corners(frame: &eframe::Frame, round: bool) {
@@ -1900,6 +1922,10 @@ impl eframe::App for MusicApp {
         }
         if self.window_handle.is_none() {
             self.window_handle = window_handle(_frame);
+            #[cfg(windows)]
+            if let Some(hwnd) = self.window_handle {
+                dark_title_bar(hwnd);
+            }
         }
         let revision = self.offline.revision();
         if self.download_tracks.0 != revision {
