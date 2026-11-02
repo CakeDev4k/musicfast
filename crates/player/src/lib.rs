@@ -7,6 +7,7 @@ pub mod m4a;
 pub mod offline;
 mod render;
 pub mod source;
+pub mod strategy;
 pub mod ytdlp;
 
 pub use engine::{Command, Config, Player, Repeat, Snapshot, Status, curve};

@@ -16,8 +16,9 @@
 //! `visionos` (~4 s) e entrega o endereço da TV, que leva 403 até o
 //! `available_at` — 4 a 6 s no futuro (o yt-dlp dorme esse tempo antes de
 //! baixar). Só `visionos`: 2,6–3,0 s e o endereço vale na hora. Por isso ele
-//! vem primeiro, e o padrão é a reserva; o download respeita o
-//! `available_at` nos dois casos.
+//! é a ordem de partida; o download respeita o `available_at` em todos. Como
+//! o YouTube muda o que cada cliente aceita sem aviso, a ordem depois disso
+//! é aprendida nesta máquina (`strategy`), não fixa aqui.
 //!
 //! O resto da velocidade vem de resolver ANTES de precisar (a próxima da
 //! fila, o que está sob o mouse) e de guardar o resultado até ele vencer
@@ -29,15 +30,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::strategy::{self, Way};
+
 const REPO: &str = "yt-dlp/yt-dlp";
 /// Os builds de toda noite: as correções contra as mudanças do YouTube saem
-/// aqui dias antes da versão estável. O app passa para eles quando a estável
-/// mais nova ainda falha com cara de yt-dlp velho, e fica neles.
+/// aqui dias antes da estável (que sai mais ou menos uma vez por mês). É o
+/// canal que o próprio yt-dlp recomenda para o uso comum ("the recommended
+/// channel for regular users", README, 02/11/2026). A estável fica de
+/// reserva, se a noturna não instalar.
 const NIGHTLY_REPO: &str = "yt-dlp/yt-dlp-nightly-builds";
 /// A versão em pasta (abre rápido) de cada sistema, e o executável dentro
 /// dela. `PATH_EXE` é o nome de um yt-dlp instalado pelo sistema.
@@ -74,6 +80,20 @@ const CHECK_EVERY: Duration = Duration::from_secs(24 * 3600);
 /// sobra é para a primeira, com o desafio de JavaScript e a rede lenta.
 /// Antes não havia teto: um yt-dlp travado prendia a música para sempre.
 const RESOLVE_LIMIT: Duration = Duration::from_secs(60);
+/// Depois disso, nenhum jeito novo começa: a pessoa já esperou demais e o
+/// erro sai. (Os que já rodam ainda podem acertar até `RESOLVE_LIMIT`.)
+const RESOLVE_BUDGET: Duration = Duration::from_secs(40);
+/// Se o jeito da vez não respondeu nisto (o normal é 3 s), o seguinte
+/// começa junto e vale o que acertar primeiro: um yt-dlp engasgado (rede,
+/// antivírus olhando o executável) não segura a música.
+const HEDGE_AFTER: Duration = Duration::from_secs(7);
+/// Jeitos rodando ao mesmo tempo, no máximo: cada um é um pedido ao YouTube.
+const MAX_PARALLEL: usize = 2;
+/// O Deno gerenciado é conferido uma vez por mês (o yt-dlp pode passar a
+/// exigir um mais novo; são 43 MB, então não todo dia).
+const DENO_CHECK_EVERY: Duration = Duration::from_secs(30 * 24 * 3600);
+/// O yt-dlp ignora Deno abaixo disto (o EJS pede o 2).
+const DENO_MIN_MAJOR: u32 = 2;
 
 /// O Deno resolve o desafio de JavaScript do player do YouTube para o
 /// yt-dlp. Sem ele, só os clientes que dispensam o desafio funcionam (o
@@ -259,14 +279,16 @@ pub fn explain(stderr: &str) -> String {
         .or_else(|| stderr.lines().rev().map(str::trim).find(|l| !l.is_empty()))
         .unwrap_or("");
     let lower = last.to_lowercase();
-    if lower.contains("sign in to confirm") || lower.contains("not a bot") {
+    // A idade antes do robô: as duas mensagens começam com "Sign in to
+    // confirm", e a de idade virava "não é um robô" (e a pausa dele).
+    if lower.contains("confirm your age") || lower.contains("age-restricted") || (lower.contains("age") && lower.contains("inappropriate")) {
+        "música com restrição de idade (precisa de login)".into()
+    } else if lower.contains("sign in to confirm") || lower.contains("not a bot") {
         "o YouTube pediu para confirmar que não é um robô; entre com sua conta para continuar".into()
     } else if lower.contains("video unavailable") || lower.contains("private video") || lower.contains("removed") {
         "música indisponível no YouTube".into()
     } else if lower.contains("requested format is not available") {
         "o YouTube não ofereceu áudio AAC para esta música".into()
-    } else if lower.contains("age") && lower.contains("confirm") {
-        "música com restrição de idade (precisa de login)".into()
     } else if lower.contains("certificate_verify_failed") || lower.contains("certificate verify failed") {
         "a conexão com o YouTube foi interceptada (antivírus ou proxy com certificado próprio)".into()
     } else if lower.contains("http error 429") || lower.contains("too many requests") {
@@ -277,6 +299,49 @@ pub fn explain(stderr: &str) -> String {
         "o yt-dlp falhou sem dizer por quê".into()
     } else {
         last.trim_start_matches("ERROR:").trim().chars().take(160).collect()
+    }
+}
+
+/// O que um erro (já explicado) de um jeito quer dizer para os outros.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    /// Da música (indisponível): nenhum outro jeito resolve.
+    Song,
+    /// Da máquina ou da rede (sem conexão, executável bloqueado, limite de
+    /// pedidos): os outros dariam no mesmo, e insistir piora o limite.
+    Everyone,
+    /// Deste jeito: o próximo pode passar. Conta contra ele na memória.
+    Way,
+    /// Pede a conta (restrição de idade): o próximo pode passar, mas não é
+    /// defeito do jeito.
+    NeedsAccount,
+}
+
+fn kind(way: Way, explained: &str) -> Kind {
+    if explained.contains("indisponível") {
+        // O embutido chama de indisponível o que só não aceita ser embutido.
+        return if way == Way::Embed { Kind::Way } else { Kind::Song };
+    }
+    if explained.contains("idade") {
+        return if way.uses_account() { Kind::Song } else { Kind::NeedsAccount };
+    }
+    // Sem IPv6 na casa, o pedido por IPv6 não conecta: defeito do jeito.
+    if way == Way::Ipv6 && explained.contains("sem conexão") {
+        return Kind::Way;
+    }
+    let everyone = ["sem conexão", "interceptada", "limitou", "não abriu", "bloqueado"];
+    if everyone.iter().any(|k| explained.contains(k)) { Kind::Everyone } else { Kind::Way }
+}
+
+/// Qual erro mostrar, entre os de vários jeitos: o da música primeiro, depois
+/// o "não é um robô", depois o resto; o do embutido e o do IPv6 por último
+/// (dizem mais do jeito que da música). Menor é melhor.
+fn rank(way: Way, explained: &str) -> u8 {
+    match kind(way, explained) {
+        Kind::Song | Kind::NeedsAccount => 0,
+        _ if is_bot_check(explained) => 1,
+        _ if matches!(way, Way::Embed | Way::Ipv6) => 3,
+        _ => 2,
     }
 }
 
@@ -319,6 +384,7 @@ enum Ip {
     V6,
 }
 
+#[derive(Clone)]
 pub struct YtDlp {
     pub exe: PathBuf,
     /// A pasta do Deno gerenciado (pode ainda não existir).
@@ -340,51 +406,99 @@ impl YtDlp {
         self.exe.starts_with(managed)
     }
 
-    /// O cliente `visionos` primeiro (rápido, sem espera); se ele falhar, o
-    /// padrão do yt-dlp. A reserva é um caminho testado, não um palpite:
-    /// `ytdlp_live` no fim deste arquivo roda os dois.
-    ///
-    /// Com a conta, ela vai na frente: dá o áudio de 256 kbps a quem tem
-    /// Premium e abre as músicas com restrição de idade. Se a conta falhar
-    /// (sessão vencida, o cliente `tv` mudou), segue o caminho anônimo.
+    /// Tenta os jeitos (`strategy::Way`) na ordem aprendida até um acertar.
+    /// Um erro da música ou da rede para na hora (os outros dariam no
+    /// mesmo); um erro do jeito passa ao seguinte. Se o da vez demora mais
+    /// que `HEDGE_AFTER`, o seguinte começa junto. Cada resultado, até de
+    /// quem perdeu a corrida, ensina a ordem da próxima música.
     pub fn resolve(&self, video_id: &str, account: Option<&Account>) -> Result<Resolved, (String, bool)> {
-        if let Some(account) = account {
-            match CookieFile::write(account) {
-                Ok(file) => match self.run(video_id, Some(ACCOUNT_CLIENT), ACCOUNT_FORMAT, Some(&file.0), Ip::V4) {
-                    Ok(r) => return Ok(r),
-                    Err((error, outdated)) if error.contains("indisponível") => return Err((error, outdated)),
-                    Err((error, _)) => log::info!("{video_id}: com a conta falhou ({error}); tentando sem"),
-                },
-                Err(error) => log::warn!("arquivo de cookies do yt-dlp: {error}"),
+        let started = Instant::now();
+        let mut pending: VecDeque<Way> = strategy::current_order(account.is_some(), now()).into();
+        let (tx, rx) = std::sync::mpsc::channel::<(Way, Result<Resolved, (String, bool)>)>();
+        let launch = |way: Way| {
+            let (me, id, account, tx) = (self.clone(), video_id.to_owned(), account.cloned(), tx.clone());
+            let spawned = std::thread::Builder::new().name("resolver".into()).spawn(move || {
+                let t = Instant::now();
+                let result = me.attempt(&id, way, account.as_ref());
+                match &result {
+                    Ok(r) => strategy::success(way, t.elapsed().as_millis() as u64, r.format_id.as_deref() == Some("141"), now()),
+                    Err((error, _)) if kind(way, error) == Kind::Way => strategy::failure(way, now()),
+                    Err(_) => {}
+                }
+                let _ = tx.send((way, result));
+            });
+            if let Err(error) = &spawned {
+                log::warn!("thread do yt-dlp: {error}");
+            }
+            spawned.is_ok()
+        };
+        let mut running = 0;
+        let mut stopped = false;
+        let mut outdated = false;
+        let mut best: Option<(u8, String)> = None;
+        loop {
+            // Começa o próximo se há vaga: sempre que nada roda, e junto com
+            // o da vez quando ele passou do `HEDGE_AFTER`.
+            let may_start = !stopped && running < MAX_PARALLEL && started.elapsed() < RESOLVE_BUDGET;
+            if running == 0 {
+                match pending.pop_front().filter(|_| may_start) {
+                    Some(way) => {
+                        if launch(way) {
+                            running += 1;
+                        }
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+            let wait = if may_start && !pending.is_empty() { HEDGE_AFTER } else { RESOLVE_LIMIT + Duration::from_secs(5) };
+            match rx.recv_timeout(wait) {
+                Ok((_, Ok(resolved))) => return Ok(resolved),
+                Ok((way, Err((error, old)))) => {
+                    running -= 1;
+                    outdated |= old;
+                    let k = kind(way, &error);
+                    log::info!("{video_id}: {} falhou ({error})", way.key());
+                    if k == Kind::Song {
+                        return Err((error, outdated));
+                    }
+                    stopped |= k == Kind::Everyone;
+                    let r = rank(way, &error);
+                    if best.as_ref().is_none_or(|(b, _)| r < *b) {
+                        best = Some((r, error));
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if may_start && let Some(way) = pending.pop_front() {
+                        log::info!("{video_id}: demorando; {} começa junto", way.key());
+                        if launch(way) {
+                            running += 1;
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
-        let first = match self.resolve_with(video_id, Some(FAST_CLIENT)) {
-            Ok(r) => return Ok(r),
-            Err((error, outdated)) if error.contains("indisponível") => return Err((error, outdated)),
-            Err(e) => e,
+        let error = best.map(|(_, e)| e).unwrap_or_else(|| "o yt-dlp falhou sem dizer por quê".to_owned());
+        Err((error, outdated))
+    }
+
+    /// Um jeito, uma chamada do yt-dlp.
+    fn attempt(&self, video_id: &str, way: Way, account: Option<&Account>) -> Result<Resolved, (String, bool)> {
+        let (client, format, ip) = match way {
+            Way::Fast => (Some(FAST_CLIENT), FORMAT, Ip::V4),
+            Way::Default => (None, FORMAT, Ip::V4),
+            Way::Embed => (Some(EMBED_CLIENT), FORMAT, Ip::V4),
+            Way::Ipv6 => (Some(FAST_CLIENT), FORMAT, Ip::V6),
+            Way::Account => (Some(ACCOUNT_CLIENT), ACCOUNT_FORMAT, Ip::V4),
+            Way::AccountDefault => (None, ACCOUNT_FORMAT, Ip::V4),
         };
-        log::info!("{video_id}: o cliente {FAST_CLIENT} falhou ({}); tentando o padrão", first.0);
-        let error = match self.resolve_with(video_id, None) {
-            Ok(r) => return Ok(r),
-            Err(e) => e,
-        };
-        if !is_bot_check(&first.0) && !is_bot_check(&error.0) {
-            return Err(error);
+        if !way.uses_account() {
+            return self.run(video_id, client, format, None, ip);
         }
-        // O "não é um robô" depende do cliente e do endereço: o embutido
-        // costuma passar, e o IPv6 (um por casa) também, quando o IPv4 é
-        // dividido com a vizinhança (CGNAT, comum nos provedores).
-        log::info!("{video_id}: o YouTube pediu o \"não é um robô\"; tentando o {EMBED_CLIENT} e o IPv6");
-        if let Ok(r) = self.run(video_id, Some(EMBED_CLIENT), FORMAT, None, Ip::V4) {
-            return Ok(r);
-        }
-        match self.run(video_id, Some(FAST_CLIENT), FORMAT, None, Ip::V6) {
-            Ok(r) => Ok(r),
-            Err((ipv6, _)) => {
-                log::info!("{video_id}: pelo IPv6 também não ({ipv6})");
-                Err(if is_bot_check(&first.0) { first } else { error })
-            }
-        }
+        let account = account.ok_or_else(|| ("sem conta".to_owned(), false))?;
+        let file = CookieFile::write(account).map_err(|e| (format!("arquivo de cookies do yt-dlp: {e}"), false))?;
+        self.run(video_id, client, format, Some(&file.0), ip)
     }
 
     pub fn resolve_with(&self, video_id: &str, client: Option<&str>) -> Result<Resolved, (String, bool)> {
@@ -577,8 +691,13 @@ fn swap_in(managed: &Path, name: &str, zip: &[u8], exe: &str) -> Result<PathBuf,
 /// Baixa o `yt-dlp_win.zip` da última release, confere o SHA-256 contra o
 /// `SHA2-256SUMS` dela e troca a pasta inteira. A versão em pasta abre em
 /// ~1 s; a de arquivo único se descompacta a cada chamada (3,9 s medidos).
+/// Instala o noturno; se ele não vier (a release da noite saiu sem o zip,
+/// o repositório mudou), o estável.
 pub fn install(managed: &Path) -> Result<YtDlp, String> {
-    install_from(managed, REPO)
+    install_from(managed, NIGHTLY_REPO).or_else(|error| {
+        log::warn!("yt-dlp noturno não instalou ({error}); tentando o estável");
+        install_from(managed, REPO)
+    })
 }
 
 fn install_from(managed: &Path, repo: &str) -> Result<YtDlp, String> {
@@ -602,37 +721,34 @@ fn install_from(managed: &Path, repo: &str) -> Result<YtDlp, String> {
     Ok(YtDlp { exe: target.join(EXE), deno_dir: managed.join("deno") })
 }
 
-/// A versão instalada é a última do canal dela? Se não, instala a nova.
-/// `after_error`: o YouTube recusou com cara de yt-dlp velho; se a estável
-/// instalada já é a mais nova, passa para os builds noturnos. `Ok(None)`:
-/// já era a última. Só vale para o yt-dlp gerenciado.
-pub fn update(managed: &Path, after_error: bool) -> Result<Option<YtDlp>, String> {
+/// O instalado é o noturno mais novo? Se não (saiu outro, ou ainda é o
+/// estável das versões antigas do app), instala. `Ok(None)`: já era. Só vale
+/// para o yt-dlp gerenciado.
+pub fn update(managed: &Path) -> Result<Option<YtDlp>, String> {
     let dir = managed.join("yt-dlp");
     let installed = std::fs::read_to_string(dir.join(VERSION_FILE)).unwrap_or_default();
     let installed = installed.trim();
     let channel = std::fs::read_to_string(dir.join(CHANNEL_FILE)).unwrap_or_default();
-    let http = http()?;
-    let mut repo = if channel.trim() == NIGHTLY_REPO { NIGHTLY_REPO } else { REPO };
-    let mut latest = latest_tag(&http, repo)?;
+    let latest = latest_tag(&http()?, NIGHTLY_REPO)?;
     let _ = std::fs::write(dir.join(CHECKED_FILE), "");
-    if after_error && repo == REPO && installed == latest {
-        repo = NIGHTLY_REPO;
-        latest = latest_tag(&http, repo)?;
-        log::info!("yt-dlp: a estável {installed} já é a mais nova; tentando a noturna {latest}");
-    }
-    if installed == latest {
+    if channel.trim() == NIGHTLY_REPO && installed == latest {
         log::info!("yt-dlp {latest} já é o mais novo");
         return Ok(None);
     }
-    log::info!("yt-dlp: instalado {installed:?}, saiu {latest} ({repo})");
-    install_from(managed, repo).map(Some)
+    log::info!("yt-dlp: instalado {installed:?} ({}), saiu {latest}", channel.trim());
+    install(managed).map(Some)
 }
 
-/// A consulta diária já passou do prazo? (Sem a marca, também.)
+/// A consulta diária já passou do prazo? (Sem a marca, também; e se o
+/// instalado ainda é o estável das versões antigas do app, já agora.)
 pub fn update_due(managed: &Path) -> bool {
     let dir = managed.join("yt-dlp");
     if !dir.join(EXE).is_file() {
         return false;
+    }
+    let channel = std::fs::read_to_string(dir.join(CHANNEL_FILE)).unwrap_or_default();
+    if channel.trim() != NIGHTLY_REPO {
+        return true;
     }
     std::fs::metadata(dir.join(CHECKED_FILE))
         .and_then(|m| m.modified())
@@ -641,11 +757,33 @@ pub fn update_due(managed: &Path) -> bool {
         .is_none_or(|age| age > CHECK_EVERY)
 }
 
-/// Garante um Deno para o yt-dlp: o do PATH serve; senão, baixa o zip
-/// oficial (~43 MB, uma vez) e confere o SHA-256 publicado junto.
+/// Garante um Deno que o yt-dlp aceite: o do PATH serve se for 2 ou mais
+/// novo (um Deno 1 esquecido na máquina ele ignora calado); senão, baixa o
+/// zip oficial (~43 MB) e confere o SHA-256 publicado junto. O gerenciado é
+/// conferido uma vez por mês e trocado se saiu outro.
 pub fn ensure_deno(managed: &Path) -> Result<(), String> {
-    if managed.join("deno").join(DENO_EXE).is_file() || on_path(DENO_EXE).is_some() {
-        return Ok(());
+    let dir = managed.join("deno");
+    if dir.join(DENO_EXE).is_file() {
+        let due = std::fs::metadata(dir.join(CHECKED_FILE))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_none_or(|age| age > DENO_CHECK_EVERY);
+        if !due {
+            return Ok(());
+        }
+        let installed = std::fs::read_to_string(dir.join(VERSION_FILE)).unwrap_or_default();
+        let latest = latest_tag(&http()?, DENO_REPO)?;
+        let _ = std::fs::write(dir.join(CHECKED_FILE), "");
+        if installed.trim() == latest {
+            return Ok(());
+        }
+        log::info!("Deno: instalado {:?}, saiu {latest}", installed.trim());
+    } else if let Some(path_deno) = on_path(DENO_EXE) {
+        match deno_major(&path_deno) {
+            Some(major) if major >= DENO_MIN_MAJOR => return Ok(()),
+            major => log::info!("o Deno do PATH ({}) é velho para o yt-dlp ({major:?}); baixando um", path_deno.display()),
+        }
     }
     let http = http()?;
     let tag = latest_tag(&http, DENO_REPO)?;
@@ -658,8 +796,23 @@ pub fn ensure_deno(managed: &Path) -> Result<(), String> {
         return Err(format!("o Deno baixado não confere (esperado {expected}, veio {actual})"));
     }
     let target = swap_in(managed, "deno", &zip, DENO_EXE)?;
+    let _ = std::fs::write(target.join(VERSION_FILE), &tag);
+    let _ = std::fs::write(target.join(CHECKED_FILE), "");
     log::info!("Deno {tag} instalado em {}", target.display());
     Ok(())
+}
+
+/// A versão principal de um Deno (`deno 2.5.1 (stable, …)` → 2).
+fn deno_major(exe: &Path) -> Option<u32> {
+    let mut cmd = Command::new(exe);
+    cmd.arg("--version");
+    let out = crate::job::output(cmd, Duration::from_secs(20)).ok()?;
+    parse_deno_major(&String::from_utf8_lossy(&out.stdout))
+}
+
+pub fn parse_deno_major(version: &str) -> Option<u32> {
+    let rest = version.trim_start().strip_prefix("deno ")?;
+    rest.split('.').next()?.trim().parse().ok()
 }
 
 /// Extrai recusando o zip inteiro se um nome sair da pasta.
@@ -780,6 +933,25 @@ mod tests {
         }
     }
 
+    /// Contra o YouTube: o caminho de verdade (`resolve`, na ordem
+    /// aprendida) acerta, baixa, e o acerto fica gravado na memória.
+    #[test]
+    #[ignore]
+    fn resolve_live() {
+        let dir = std::env::var_os("MUSICFAST_BIN").map(PathBuf::from).unwrap_or_default();
+        let y = YtDlp::locate(&dir).expect("nenhum yt-dlp");
+        let memory = std::env::temp_dir().join(format!("musicfast-teste-memoria-{}.json", std::process::id()));
+        strategy::remember_in(memory.clone());
+        let started = Instant::now();
+        let r = y.resolve("djV11Xbc914", None).unwrap_or_else(|e| panic!("{}", e.0));
+        println!("resolvido em {} ms", started.elapsed().as_millis());
+        let bytes = crate::source::fetch(&crate::source::http_client(), &r).unwrap_or_else(|_| panic!("download"));
+        crate::source::Decoder::open(bytes).expect("decodificador");
+        let text = std::fs::read_to_string(&memory).expect("memória gravada");
+        assert!(text.contains("ok_at"), "{text}");
+        let _ = std::fs::remove_file(&memory);
+    }
+
     /// Contra o GitHub: instala o yt-dlp e o Deno numa pasta vazia, a
     /// consulta de versão diz que já é a última, e o cliente padrão (o que
     /// precisa do Deno) resolve. `MUSICFAST_TMP=<pasta vazia> cargo test -p
@@ -788,20 +960,44 @@ mod tests {
     #[ignore]
     fn manutencao_live() {
         let dir = PathBuf::from(std::env::var_os("MUSICFAST_TMP").expect("MUSICFAST_TMP"));
-        let y = install(&dir).expect("instalar");
-        assert!(update(&dir, false).expect("consultar").is_none());
-        assert!(!update_due(&dir));
-        // Depois de um erro com a estável já na última: vai para a noturna, e
-        // a consulta diária segue nela.
-        let y = update(&dir, true).expect("noturna").expect("instalou a noturna");
+        // Uma instalação antiga, do estável: a consulta passa para o noturno.
+        install_from(&dir, REPO).expect("instalar o estável");
+        let y = update(&dir).expect("consultar").expect("passou para o noturno");
         assert_eq!(std::fs::read_to_string(dir.join("yt-dlp").join(CHANNEL_FILE)).unwrap(), NIGHTLY_REPO);
-        assert!(update(&dir, false).expect("consultar a noturna").is_none());
+        assert!(update(&dir).expect("consultar de novo").is_none());
+        assert!(!update_due(&dir));
         // Sem Deno no PATH, para baixar o gerenciado.
         // SAFETY: este teste roda sozinho (`--ignored manutencao`).
         unsafe { std::env::set_var("PATH", std::env::var_os("SystemRoot").map(|r| PathBuf::from(r).join("System32")).unwrap_or_default()) };
         ensure_deno(&dir).expect("Deno");
         assert!(dir.join("deno").join(DENO_EXE).is_file());
         y.resolve_with("djV11Xbc914", None).unwrap_or_else(|e| panic!("cliente padrão: {}", e.0));
+    }
+
+    #[test]
+    fn errors_are_sorted_by_who_they_concern() {
+        let bot = explain("ERROR: [youtube] abc: Sign in to confirm you're not a bot");
+        let gone = explain("ERROR: [youtube] abc: Video unavailable");
+        let age = explain("ERROR: [youtube] abc: Sign in to confirm your age");
+        let offline = explain("ERROR: [youtube] abc: Unable to download API page: getaddrinfo failed");
+        assert_eq!(kind(Way::Fast, &bot), Kind::Way);
+        assert_eq!(kind(Way::Fast, &gone), Kind::Song);
+        // O embutido diz indisponível ao que só não aceita ser embutido.
+        assert_eq!(kind(Way::Embed, &gone), Kind::Way);
+        assert_eq!(kind(Way::Fast, &age), Kind::NeedsAccount);
+        assert_eq!(kind(Way::Account, &age), Kind::Song);
+        assert_eq!(kind(Way::Fast, &offline), Kind::Everyone);
+        // Sem IPv6 em casa, o jeito por IPv6 é que falha, não a rede.
+        assert_eq!(kind(Way::Ipv6, &offline), Kind::Way);
+        assert!(rank(Way::Fast, &age) < rank(Way::Fast, &bot));
+        assert!(rank(Way::Fast, &bot) < rank(Way::Ipv6, &offline));
+    }
+
+    #[test]
+    fn deno_versions_are_read() {
+        assert_eq!(parse_deno_major("deno 2.5.1 (stable, release, x86_64-pc-windows-msvc)\nv8 14.0"), Some(2));
+        assert_eq!(parse_deno_major("deno 1.46.3 (release)"), Some(1));
+        assert_eq!(parse_deno_major("nada"), None);
     }
 
     #[test]

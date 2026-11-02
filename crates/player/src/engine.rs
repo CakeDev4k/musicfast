@@ -235,6 +235,13 @@ const WARM_PER_MINUTE: usize = 6;
 /// Depois de um "confirme que não é um robô", o tempo sem resoluções
 /// antecipadas: só a música pedida e a próxima da fila.
 const BOT_COOLDOWN: Duration = Duration::from_secs(10 * 60);
+/// Um erro com cara de yt-dlp velho consulta uma versão nova no máximo
+/// isto de vez em quando (antes, uma vez por abertura: o app fica aberto
+/// dias, e a correção saía no dia seguinte sem chegar).
+const ERROR_UPDATE_EVERY: Duration = Duration::from_secs(3 * 3600);
+/// De quanto em quanto tempo o player confere se a consulta diária do
+/// yt-dlp venceu (antes, só ao abrir o app).
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(3600);
 
 struct Engine {
     rx: Receiver<Msg>,
@@ -265,6 +272,9 @@ struct Engine {
     warmed_at: VecDeque<Instant>,
     /// Até quando não antecipar nada (o YouTube pediu o "não é um robô").
     bot_until: Option<Instant>,
+    /// A última consulta de versão por causa de um erro.
+    error_update_at: Option<Instant>,
+    next_update_check: Instant,
 
     resolved: HashMap<String, Resolved>,
     resolving: HashSet<String>,
@@ -324,8 +334,10 @@ impl Engine {
         // A mesma fila (vazia) do `Snapshot`: `publish` compara por ponteiro.
         let queue = snapshot.lock().unwrap_or_else(|e| e.into_inner()).queue.clone();
         let ytdlp = YtDlp::locate(&config.bin_dir).map(Arc::new);
-        let cookie_dir = config.cache_file.parent().map(|d| d.join("tmp")).unwrap_or_else(|| config.bin_dir.join("tmp"));
+        let data_dir = config.cache_file.parent().map(PathBuf::from).unwrap_or_else(|| config.bin_dir.clone());
+        let cookie_dir = data_dir.join("tmp");
         ytdlp::clear_cookie_files(&cookie_dir);
+        crate::strategy::remember_in(data_dir.join("estrategias.json"));
         Self {
             rx,
             tx,
@@ -350,6 +362,8 @@ impl Engine {
             install_failed_at: None,
             warmed_at: VecDeque::new(),
             bot_until: None,
+            error_update_at: None,
+            next_update_check: Instant::now() + UPDATE_CHECK_EVERY,
             resolved,
             resolving: HashSet::new(),
             retried: HashSet::new(),
@@ -506,6 +520,12 @@ impl Engine {
         }
         if self.cache_dirty && self.cache_saved.elapsed() > Duration::from_secs(30) {
             self.save_cache();
+        }
+        if Instant::now() >= self.next_update_check {
+            self.next_update_check = Instant::now() + UPDATE_CHECK_EVERY;
+            if !self.installing && ytdlp::update_due(&self.bin_dir) {
+                self.spawn_maintenance();
+            }
         }
     }
 
@@ -1061,7 +1081,7 @@ impl Engine {
         answering("instalar-yt-dlp", self.tx.clone(), Some(failed), move || {
             let _ = std::fs::create_dir_all(&dir);
             let result = if managed {
-                ytdlp::update(&dir, true).and_then(|fresh| fresh.ok_or_else(|| musicfast_i18n::t().ytdlp_already_latest.to_owned()))
+                ytdlp::update(&dir).and_then(|fresh| fresh.ok_or_else(|| musicfast_i18n::t().ytdlp_already_latest.to_owned()))
             } else {
                 ytdlp::install(&dir)
             };
@@ -1085,7 +1105,7 @@ impl Engine {
             if let Err(error) = ytdlp::ensure_deno(&dir) {
                 log::warn!("Deno não instalado: {error}");
             }
-            due.then(|| Msg::Updated(ytdlp::update(&dir, false)))
+            due.then(|| Msg::Updated(ytdlp::update(&dir)))
         });
     }
 
@@ -1179,10 +1199,11 @@ impl Engine {
                     self.spawn_install();
                     return;
                 }
-                if outdated && !self.tried_update && !self.installing {
+                let may_update = self.error_update_at.is_none_or(|at| at.elapsed() >= ERROR_UPDATE_EVERY);
+                if outdated && may_update && !self.installing {
                     // O YouTube mudou e o yt-dlp envelheceu: atualiza e tenta
-                    // de novo uma vez (como o Download de Mídias faz).
-                    self.tried_update = true;
+                    // de novo (como o Download de Mídias faz).
+                    self.error_update_at = Some(Instant::now());
                     self.spawn_install();
                     return;
                 }
