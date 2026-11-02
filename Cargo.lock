@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "musicfast"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "eframe",
@@ -3245,14 +3245,14 @@ dependencies = [
 
 [[package]]
 name = "musicfast-i18n"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "windows-sys 0.60.2",
 ]
 
 [[package]]
 name = "musicfast-player"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "fastframe-audio",
  "log",
@@ -3270,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "musicfast-ytm"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "log",
  "musicfast-i18n",
@@ -4520,7 +4520,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "release-sign"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "ring",
 ]
