@@ -13,11 +13,13 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::{Color32, ColorImage, CornerRadius, Rect, TextureHandle, TextureId, TextureOptions, Ui};
+use musicfast_player::disk_cache::DiskCache;
 use musicfast_ytm::{ThumbSource, Thumbs};
 
 use crate::ui::{icons, theme};
@@ -25,6 +27,10 @@ use crate::ui::{icons, theme};
 const WORKERS: usize = 4;
 const MAX_PENDING: usize = 160;
 const MAX_TEXTURES: usize = 500;
+/// O teto das capas guardadas em disco: miniaturas de 10–60 kB, milhares
+/// delas.
+const DISK_BUDGET: u64 = 100 * 1024 * 1024;
+
 /// O teto da memória de vídeo das capas. As 500 texturas de antes podiam
 /// passar de 250 MB numa tela de alta densidade (a grade usa o degrau de
 /// 360 px, 518 kB cada); uma tela cheia de capas cabe em ~15 MB. Passando
@@ -88,14 +94,15 @@ fn bucket(px: u32) -> u32 {
 }
 
 impl Covers {
-    pub fn new(ctx: &egui::Context, http: Arc<reqwest::blocking::Client>) -> Self {
+    pub fn new(ctx: &egui::Context, http: Arc<reqwest::blocking::Client>, cache_dir: PathBuf) -> Self {
         let queue = Arc::new(Queue::default());
         let (tx, rx) = channel();
+        let disk = Arc::new(DiskCache::new(cache_dir, DISK_BUDGET, "img"));
         for n in 0..WORKERS {
-            let (queue, tx, http, ctx) = (queue.clone(), tx.clone(), http.clone(), ctx.clone());
+            let (queue, tx, http, ctx, disk) = (queue.clone(), tx.clone(), http.clone(), ctx.clone(), disk.clone());
             let _ = std::thread::Builder::new()
                 .name(format!("capas-{n}"))
-                .spawn(move || worker(&queue, &tx, &http, &ctx));
+                .spawn(move || worker(&queue, &tx, &http, &ctx, &disk));
         }
         Self { entries: HashMap::new(), queue, rx, frame: 0, bytes: 0 }
     }
@@ -224,7 +231,7 @@ impl Covers {
     }
 }
 
-fn worker(queue: &Queue, tx: &Sender<(u64, Option<(ColorImage, Color32)>)>, http: &reqwest::blocking::Client, ctx: &egui::Context) {
+fn worker(queue: &Queue, tx: &Sender<(u64, Option<(ColorImage, Color32)>)>, http: &reqwest::blocking::Client, ctx: &egui::Context, disk: &DiskCache) {
     loop {
         let request = {
             let mut pending = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -236,7 +243,7 @@ fn worker(queue: &Queue, tx: &Sender<(u64, Option<(ColorImage, Color32)>)>, http
             }
         };
         // Uma capa que derruba o decodificador não leva a thread junto.
-        let fetched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch(http, &request)));
+        let fetched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch(http, disk, &request)));
         let image = match fetched {
             Ok(Ok(image)) => Some(image),
             Ok(Err(error)) => {
@@ -269,9 +276,24 @@ pub fn read(http: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, Stri
         .map_err(|e| e.to_string())
 }
 
-fn fetch(http: &reqwest::blocking::Client, request: &Request) -> Result<(ColorImage, Color32), String> {
-    let bytes = read(http, &request.url)?;
-    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+/// A capa: do cache em disco se já veio uma vez (o endereço já diz o
+/// tamanho), senão da internet, e aí guardada. A que está no cache e não
+/// decodifica sai dele e vem de novo.
+fn fetch(http: &reqwest::blocking::Client, disk: &DiskCache, request: &Request) -> Result<(ColorImage, Color32), String> {
+    let local = request.url.starts_with(musicfast_player::offline::LOCAL_PREFIX);
+    let name = DiskCache::hashed(&request.url);
+    let cached = if local { None } else { disk.read(&name).and_then(|bytes| image::load_from_memory(&bytes).ok()) };
+    let img = match cached {
+        Some(img) => img,
+        None => {
+            let bytes = read(http, &request.url)?;
+            let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+            if !local {
+                disk.put(&name, &bytes);
+            }
+            img
+        }
+    };
     let rgba = fit_square(img, request.px).to_rgba8();
     let color = vivid_average(rgba.as_raw());
     Ok((ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()), color))
@@ -367,7 +389,7 @@ mod tests {
     #[test]
     fn over_the_budget_the_oldest_go_and_the_visible_stay() {
         let ctx = egui::Context::default();
-        let mut covers = Covers::new(&ctx, Arc::new(reqwest::blocking::Client::new()));
+        let mut covers = Covers::new(&ctx, Arc::new(reqwest::blocking::Client::new()), std::env::temp_dir().join("musicfast-teste-capas"));
         // 80 capas de 544 px (1,18 MB cada): 94 MB, acima do teto.
         for k in 0..80u64 {
             let texture = ctx.load_texture("teste", ColorImage::filled([544, 544], Color32::RED), TextureOptions::LINEAR);

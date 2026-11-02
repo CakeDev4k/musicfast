@@ -439,3 +439,64 @@ ficaram de fora.
 - As mensagens novas do yt-dlp e dos pânicos são em português direto, como
   as outras do `ytdlp.rs`; as da fila e do rádio usam `ytm_internal_error`,
   que já existe nos três idiomas.
+
+## 4. Quarta passada — rede, disco e a primeira música (02/11/2026)
+
+A tela já estava medida (§1–2); o que sobrava estava fora dela.
+
+### 4.1 O catálogo vinha sem compressão
+O `reqwest` estava sem os recursos de descompressão, e o YouTube mandava o
+JSON cru. Com `gzip` (e o User-Agent de Chrome que o cliente já usa, que o
+YouTube aceita para compactar), a página inicial cai de 424 kB para 38 kB
+(medido com `curl`, mesmo pedido). Em rede rápida o tempo é latência e não
+muda; em rede lenta é 1–2 s a menos por página.
+
+### 4.2 O yt-dlp frio na primeira música
+A primeira abertura do yt-dlp depois de ligar o computador levou 3,5 s; as
+seguintes, 0,74 s (o Windows e o antivírus leem os ~80 arquivos dele).
+`YtDlp::warm` abre um `--version` em segundo plano quando o player começa:
+quem paga a abertura fria é ele, não a primeira música.
+
+### 4.3 Músicas tocadas, capas e a página inicial em disco
+`disk_cache::DiskCache`: pasta com teto, a data de modificação é o "usado
+por último" (cada leitura renova), a faxina apaga pelas mais velhas até
+90 % do teto, escrita por temporário e troca de nome.
+- Músicas tocadas (`tocadas/`, 300 MB ≈ 80 músicas): a repetida vem do
+  disco em ~10 ms, sem yt-dlp e sem pedido ao YouTube. Uma cópia que não
+  decodifica sai do cache e a música vem de novo.
+- Capas (`capas-cache/`, 100 MB): pelo endereço (que já diz o tamanho).
+- Página inicial (`inicio.json`, da conta e do idioma de agora): aparece no
+  primeiro quadro, e a de agora a troca quando chega; se a de agora falha,
+  a guardada fica na tela em vez do erro.
+Tudo entra em "Armazenamento e cache" e sai com "Limpar cache".
+
+**Medido no app** (build de debug, pasta de dados isolada com a fila do
+dono, sem a conta):
+
+| | 1ª abertura | 2ª abertura |
+|---|---|---|
+| Música restaurada | resolvida em 3.016 ms + 47 ms de download | do disco: nenhum yt-dlp, nenhum download |
+| Página inicial | da rede | no primeiro quadro (log "página inicial guardada") |
+| Capas | 41 baixadas e guardadas | do disco (5 novas, da página de agora) |
+| yt-dlp aquecido | 1.099 ms (em segundo plano) | 835 ms |
+
+**Cobertura.**
+- `disk_cache::tests` (3): ida e volta e nomes perigosos recusados
+  (`../fora`, `a:b`); a faxina tira a menos usada (a mais velha que acabou
+  de ser lida fica); arquivo acima de um quarto do teto não entra.
+- `engine::tests::a_played_song_comes_from_disk_without_ytdlp`.
+- `storage::tests::the_saved_home_only_comes_back_for_the_same_account_and_language`.
+
+**Descartado.**
+- *Brotli*: a página vinha ainda menor que com gzip, mas o app de debug
+  morria (código 139) assim que a primeira página chegava — a hipótese é o
+  descompressor estourar a pilha da thread interna do `reqwest`. O gzip dá
+  quase o mesmo ganho e não tem esse risco.
+- *Tocar enquanto baixa*: só ajuda quem tem rede lenta (a 5 Mbps uma
+  música de 3,9 MB leva ~6 s), e o decodificador roda no callback de áudio
+  sobre bytes completos (§ cabeçalho de `source.rs`). Fica para outra vez.
+
+**Não conferido.**
+- O build de release no app rodando (o CI compila e testa; o teste acima
+  foi no de debug).
+- A página com a conta (a pasta isolada não tinha a sessão).

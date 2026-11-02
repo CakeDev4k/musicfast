@@ -170,6 +170,7 @@ fn storage(ui: &mut Ui, cx: &mut Cx, usage: Option<crate::storage::Usage>, busy:
     ui.label(egui::RichText::new(t().storage_hint).color(theme::TEXT_DIM));
     ui.add_space(14.0);
     let rows = [
+        (t().storage_songs, usage.map(|u| u.songs)),
         (t().storage_lyrics, usage.map(|u| u.lyrics)),
         (t().storage_covers, usage.map(|u| u.covers)),
         (t().storage_browser, usage.map(|u| u.browser)),

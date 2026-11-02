@@ -28,6 +28,14 @@ use crate::ui::{Action, Cx, Dialog, Me, PageState, Side, View, dialog, kit, mini
 /// Quanto o mouse fica parado numa música antes de o player resolvê-la.
 const WARM_DWELL: Duration = Duration::from_millis(400);
 
+/// De quem e em que idioma é a página inicial guardada: a de outra conta ou
+/// de outro idioma não aparece.
+fn home_key(signed_in: bool, slot: Option<&str>, client: &Client) -> String {
+    let (hl, gl) = client.locale();
+    let who = if signed_in { slot.unwrap_or_default() } else { "-" };
+    format!("{who}|{hl}|{gl}")
+}
+
 /// O mini player aberto.
 struct Mini {
     lyrics: bool,
@@ -215,6 +223,7 @@ impl MusicApp {
                 client: client.clone(),
                 volume: saved.volume,
                 offline: Some(offline.clone()),
+                played_dir: Some(paths.played.clone()),
             },
             Arc::new(move || repaint.request_repaint()),
         );
@@ -255,13 +264,20 @@ impl MusicApp {
             jobs.playlists();
         }
         jobs.load(View::Home);
+        // A página inicial da última vez aparece no primeiro quadro; a de
+        // agora a troca quando chegar (~0,7 s, mais em rede lenta).
+        let home_key = home_key(me.signed_in, me.active.as_deref(), &client);
+        let cached_home = crate::storage::load_home(&paths.home_cache, &home_key).map(Arc::new);
+        if let Some(home) = &cached_home {
+            log::info!("página inicial guardada na tela ({} prateleiras) enquanto a de agora chega", home.shelves.len());
+        }
         jobs.clean_lyrics(paths.lyrics.clone());
         let waker = ctx.clone();
         let controls = np::NowPlaying::start(np::App::new("musicfast", "MusicFast"), move || waker.request_repaint());
         let waker = ctx.clone();
         let discord = crate::discord::Discord::start(move || waker.request_repaint());
         Self {
-            covers: Covers::new(ctx, http),
+            covers: Covers::new(ctx, http, paths.cover_cache.clone()),
             wake,
             _instance: instance,
             client,
@@ -272,7 +288,7 @@ impl MusicApp {
             snap_rev: u64::MAX,
             history: vec![View::Home],
             at: 0,
-            pages: HashMap::from([(View::Home, PageState::default())]),
+            pages: HashMap::from([(View::Home, PageState { page: cached_home, ..PageState::default() })]),
             search: SearchBox::default(),
             side: saved.side.as_deref().and_then(Side::from_key),
             sidebar_mini: saved.sidebar_mini,
@@ -922,12 +938,21 @@ impl MusicApp {
         while let Ok(reply) = self.replies.try_recv() {
             match reply {
                 Reply::Page { view, result } => {
+                    let home = view == View::Home;
                     let state = self.pages.entry(view).or_default();
                     match result {
                         Ok(page) => {
-                            state.page = Some(Arc::new(page));
+                            let page = Arc::new(page);
+                            state.page = Some(page.clone());
                             state.error = None;
+                            if home {
+                                let key = home_key(self.me.signed_in, self.me.active.as_deref(), &self.client);
+                                crate::storage::save_home(self.paths.home_cache.clone(), key, page);
+                            }
                         }
+                        // A página da última vez continua na tela: melhor que
+                        // trocá-la por um erro.
+                        Err(error) if state.page.is_some() => log::warn!("página (fica a guardada): {error}"),
                         Err(error) => {
                             log::warn!("página: {error}");
                             state.error = Some(error);

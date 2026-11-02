@@ -1,10 +1,10 @@
 //! O que o app ocupa no disco, e a faxina do cache.
 //!
-//! O áudio nunca vai para o disco (toca da memória, até 48 MB). No disco
-//! ficam só coisas pequenas que se refazem sozinhas: as letras, as capas
-//! dos controles de mídia e o cache do navegador da janela de login. A
-//! conta, a fila, as preferências e os fundos escolhidos não são cache e
-//! nunca saem daqui.
+//! No disco ficam só coisas que se refazem sozinhas, todas com teto: as
+//! últimas músicas tocadas (`PLAYED_BUDGET`, para recomeçarem na hora), as
+//! capas, as letras, a página inicial da última vez e o cache do navegador
+//! da janela de login. A conta, a fila, as preferências, os fundos
+//! escolhidos e as músicas baixadas não são cache e nunca saem daqui.
 
 use std::path::Path;
 
@@ -31,6 +31,7 @@ const BROWSER_LIMIT: u64 = 40 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Usage {
+    pub songs: u64,
     pub lyrics: u64,
     pub covers: u64,
     pub browser: u64,
@@ -38,25 +39,58 @@ pub struct Usage {
 
 impl Usage {
     pub fn total(&self) -> u64 {
-        self.lyrics + self.covers + self.browser
+        self.songs + self.lyrics + self.covers + self.browser
     }
 }
 
 /// Mede o cache. Lê só metadados; roda numa thread.
 pub fn measure(paths: &Paths) -> Usage {
-    Usage { lyrics: dir_size(&paths.lyrics), covers: dir_size(&paths.art), browser: paths.login_profiles().iter().map(|p| browser_size(p)).sum() }
+    Usage {
+        songs: dir_size(&paths.played),
+        lyrics: dir_size(&paths.lyrics),
+        covers: dir_size(&paths.art) + dir_size(&paths.cover_cache),
+        browser: paths.login_profiles().iter().map(|p| browser_size(p)).sum(),
+    }
 }
 
 /// Apaga o cache e diz quanto liberou. `browser`: também o do navegador do
 /// login (só com a janela de login fechada, para não mexer em arquivo
 /// aberto).
 pub fn clear(paths: &Paths, browser: bool) -> u64 {
-    let mut freed = clear_files(&paths.lyrics) + clear_files(&paths.art);
+    let mut freed = clear_files(&paths.played) + clear_files(&paths.lyrics) + clear_files(&paths.art) + clear_files(&paths.cover_cache);
+    if let Ok(meta) = std::fs::metadata(&paths.home_cache)
+        && std::fs::remove_file(&paths.home_cache).is_ok()
+    {
+        freed += meta.len();
+    }
     if browser {
         freed += paths.login_profiles().iter().map(|p| clear_browser(p)).sum::<u64>();
     }
     log::info!("cache limpo: {} liberados", human(freed));
     freed
+}
+
+/// A página inicial guardada, se é desta conta e deste idioma (`key`).
+pub fn load_home(file: &Path, key: &str) -> Option<musicfast_ytm::Page> {
+    #[derive(serde::Deserialize)]
+    struct Saved {
+        key: String,
+        page: musicfast_ytm::Page,
+    }
+    let saved: Saved = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
+    (saved.key == key && !saved.page.shelves.is_empty()).then_some(saved.page)
+}
+
+/// Guarda a página inicial numa thread (a serialização é de ~100 kB), pelo
+/// arquivo temporário.
+pub fn save_home(file: std::path::PathBuf, key: String, page: std::sync::Arc<musicfast_ytm::Page>) {
+    let _ = std::thread::Builder::new().name("guardar-inicio".into()).spawn(move || {
+        let Ok(text) = serde_json::to_string(&serde_json::json!({ "key": key, "page": &*page })) else { return };
+        let tmp = file.with_extension("tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &file);
+        }
+    });
 }
 
 /// Antes de abrir o login: se o cache do navegador passou do teto, limpa.
@@ -167,5 +201,24 @@ mod tests {
         assert!(!cache.exists());
         assert!(cookies.join("Cookies").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_saved_home_only_comes_back_for_the_same_account_and_language() {
+        let dir = std::env::temp_dir().join(format!("musicfast-teste-inicio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("inicio.json");
+        let page = musicfast_ytm::Page { shelves: vec![musicfast_ytm::Shelf::default()], ..Default::default() };
+        save_home(file.clone(), "-|pt|BR".into(), std::sync::Arc::new(page.clone()));
+        for _ in 0..200 {
+            if file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(load_home(&file, "-|pt|BR"), Some(page));
+        assert_eq!(load_home(&file, "conta|pt|BR"), None);
+        assert_eq!(load_home(&file, "-|en|US"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

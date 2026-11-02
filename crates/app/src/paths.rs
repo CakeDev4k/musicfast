@@ -28,6 +28,12 @@ pub struct Paths {
     pub download_index: PathBuf,
     /// As capas delas, fora da pasta que a pessoa abre e arrasta.
     pub download_covers: PathBuf,
+    /// As músicas tocadas recentemente (`musicfast_player::disk_cache`).
+    pub played: PathBuf,
+    /// As capas já baixadas, para o app abrir sem baixá-las de novo.
+    pub cover_cache: PathBuf,
+    /// A página inicial da última vez, mostrada enquanto a de agora chega.
+    pub home_cache: PathBuf,
     /// O perfil do WebView2 da janela de login.
     pub webview: PathBuf,
     /// As sessões e os perfis das contas além da primeira (`accounts`).
@@ -71,6 +77,9 @@ impl Paths {
             downloads: root.join("baixadas"),
             download_index: root.join("baixadas.json"),
             download_covers: root.join("capas-baixadas"),
+            played: root.join("tocadas"),
+            cover_cache: root.join("capas-cache"),
+            home_cache: root.join("inicio.json"),
             log: root.join("musicfast.log"),
             panic_log: root.join("panicos.log"),
             root,

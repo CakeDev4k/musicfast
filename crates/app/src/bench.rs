@@ -47,7 +47,8 @@ pub fn run() -> ! {
     });
 
     let http = Arc::new(reqwest::blocking::Client::new());
-    let mut covers = Covers::new(&ctx, http);
+    // As capas da medida não vão para o cache da pessoa.
+    let mut covers = Covers::new(&ctx, http, std::env::temp_dir().join("musicfast-medir-capas"));
     for i in 0..COVERS {
         let shade = (40 + i * 3) as u8;
         covers.preload(&ctx, &thumbs(i), ColorImage::filled([226, 226], egui::Color32::from_gray(shade)));
@@ -283,7 +284,7 @@ mod tests {
     fn big_playlist_frame_is_not_quadratic() {
         let ctx = egui::Context::default();
         ctx.set_fonts(fastframe_fonts::FontSetup::default().system_fallbacks(false).definitions());
-        let mut covers = Covers::new(&ctx, Arc::new(reqwest::blocking::Client::new()));
+        let mut covers = Covers::new(&ctx, Arc::new(reqwest::blocking::Client::new()), std::env::temp_dir().join("musicfast-teste-capas"));
         let me = Me::default();
         let view = View::browse("VLteste", None);
         let state = PageState { page: Some(Arc::new(playlist(2000))), ..PageState::default() };
