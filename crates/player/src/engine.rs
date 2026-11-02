@@ -228,6 +228,13 @@ const MAX_PANICS: u32 = 20;
 /// próxima tentativa. Antes não havia próxima: a falha valia até reabrir o
 /// app, e a música seguinte ficava em "Preparando o yt-dlp" para sempre.
 const INSTALL_RETRY: Duration = Duration::from_secs(60);
+/// Resoluções antecipadas (o mouse parado numa música) por minuto. Cada uma
+/// é um pedido ao YouTube que a pessoa não fez; em rajada, eles fazem o
+/// YouTube pedir para confirmar que não é um robô.
+const WARM_PER_MINUTE: usize = 6;
+/// Depois de um "confirme que não é um robô", o tempo sem resoluções
+/// antecipadas: só a música pedida e a próxima da fila.
+const BOT_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 
 struct Engine {
     rx: Receiver<Msg>,
@@ -254,6 +261,10 @@ struct Engine {
     installing: bool,
     tried_update: bool,
     install_failed_at: Option<Instant>,
+    /// Quando saiu cada resolução antecipada do último minuto.
+    warmed_at: VecDeque<Instant>,
+    /// Até quando não antecipar nada (o YouTube pediu o "não é um robô").
+    bot_until: Option<Instant>,
 
     resolved: HashMap<String, Resolved>,
     resolving: HashSet<String>,
@@ -337,6 +348,8 @@ impl Engine {
             installing: false,
             tried_update: false,
             install_failed_at: None,
+            warmed_at: VecDeque::new(),
+            bot_until: None,
             resolved,
             resolving: HashSet::new(),
             retried: HashSet::new(),
@@ -773,9 +786,20 @@ impl Engine {
             }
             Command::Warm(video_id) => {
                 let fresh = self.resolved.get(&video_id).is_some_and(|r| r.fresh(now()));
-                if !fresh && !self.resolving.contains(&video_id) && self.resolving.len() + 1 < MAX_RESOLVING {
-                    self.resolve(&video_id);
+                if fresh || self.resolving.contains(&video_id) || self.resolving.len() + 1 >= MAX_RESOLVING {
+                    return;
                 }
+                if self.bot_until.is_some_and(|until| Instant::now() < until) {
+                    return;
+                }
+                while self.warmed_at.front().is_some_and(|at| at.elapsed() > Duration::from_secs(60)) {
+                    self.warmed_at.pop_front();
+                }
+                if self.warmed_at.len() >= WARM_PER_MINUTE {
+                    return;
+                }
+                self.warmed_at.push_back(Instant::now());
+                self.resolve(&video_id);
             }
         }
     }
@@ -1037,7 +1061,7 @@ impl Engine {
         answering("instalar-yt-dlp", self.tx.clone(), Some(failed), move || {
             let _ = std::fs::create_dir_all(&dir);
             let result = if managed {
-                ytdlp::update(&dir).and_then(|fresh| fresh.ok_or_else(|| musicfast_i18n::t().ytdlp_already_latest.to_owned()))
+                ytdlp::update(&dir, true).and_then(|fresh| fresh.ok_or_else(|| musicfast_i18n::t().ytdlp_already_latest.to_owned()))
             } else {
                 ytdlp::install(&dir)
             };
@@ -1061,7 +1085,7 @@ impl Engine {
             if let Err(error) = ytdlp::ensure_deno(&dir) {
                 log::warn!("Deno não instalado: {error}");
             }
-            due.then(|| Msg::Updated(ytdlp::update(&dir)))
+            due.then(|| Msg::Updated(ytdlp::update(&dir, false)))
         });
     }
 
@@ -1143,6 +1167,9 @@ impl Engine {
                 }
             }
             Err((error, outdated)) => {
+                if ytdlp::is_bot_check(&error) {
+                    self.bot_until = Some(Instant::now() + BOT_COOLDOWN);
+                }
                 if self.ytdlp.as_ref().is_some_and(|y| !y.exe.is_file()) && !self.installing {
                     // O yt-dlp sumiu (um antivírus o pôs em quarentena, alguém
                     // apagou a pasta): instala de novo e a música espera.

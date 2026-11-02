@@ -35,6 +35,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const REPO: &str = "yt-dlp/yt-dlp";
+/// Os builds de toda noite: as correções contra as mudanças do YouTube saem
+/// aqui dias antes da versão estável. O app passa para eles quando a estável
+/// mais nova ainda falha com cara de yt-dlp velho, e fica neles.
+const NIGHTLY_REPO: &str = "yt-dlp/yt-dlp-nightly-builds";
 /// A versão em pasta (abre rápido) de cada sistema, e o executável dentro
 /// dela. `PATH_EXE` é o nome de um yt-dlp instalado pelo sistema.
 #[cfg(windows)]
@@ -61,6 +65,8 @@ const PATH_EXE: &str = "yt-dlp";
 /// arquivo cuja data marca a última consulta ao GitHub.
 const VERSION_FILE: &str = "versao.txt";
 const CHECKED_FILE: &str = "verificado";
+/// O repositório (estável ou noturno) de onde veio o instalado.
+const CHANNEL_FILE: &str = "canal.txt";
 /// O YouTube muda o site sem aviso e o yt-dlp corrige em dias: uma consulta
 /// por dia pega a correção antes de a pessoa notar.
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 3600);
@@ -93,6 +99,10 @@ const DENO_EXE: &str = "deno";
 /// (251) teria qualidade parecida e exigiria uma biblioteca em C.
 const FORMAT: &str = "140/bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]";
 const FAST_CLIENT: &str = "visionos";
+/// A reserva quando o YouTube pede o "não é um robô" aos outros: o player
+/// embutido não precisa de PO token nem de cookies e entrega o 140 (medido
+/// em 02/11/2026: 4,7 s; só serve a vídeos que aceitam ser embutidos).
+const EMBED_CLIENT: &str = "web_embedded";
 /// Com a conta: o AAC de 256 kbps (141), que o YouTube só entrega a quem tem
 /// Premium; sem Premium ele não vem e fica o de 128 kbps de sempre.
 const ACCOUNT_FORMAT: &str = "141/140/bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]";
@@ -188,6 +198,12 @@ impl Resolved {
     pub fn fresh(&self, now: u64) -> bool {
         self.expires_at > now + 15 * 60
     }
+
+    /// O endereço é de um pedido por IPv6 (o `ip=` dele, `2804%3A…`)? O
+    /// download tem de sair pela mesma família.
+    pub fn ipv6(&self) -> bool {
+        query_param(&self.url, "ip").is_some_and(|ip| ip.contains(':') || ip.contains("%3A") || ip.contains("%3a"))
+    }
 }
 
 pub fn now() -> u64 {
@@ -244,7 +260,7 @@ pub fn explain(stderr: &str) -> String {
         .unwrap_or("");
     let lower = last.to_lowercase();
     if lower.contains("sign in to confirm") || lower.contains("not a bot") {
-        "o YouTube pediu para confirmar que não é um robô".into()
+        "o YouTube pediu para confirmar que não é um robô; entre com sua conta para continuar".into()
     } else if lower.contains("video unavailable") || lower.contains("private video") || lower.contains("removed") {
         "música indisponível no YouTube".into()
     } else if lower.contains("requested format is not available") {
@@ -262,6 +278,11 @@ pub fn explain(stderr: &str) -> String {
     } else {
         last.trim_start_matches("ERROR:").trim().chars().take(160).collect()
     }
+}
+
+/// O YouTube pediu o "não é um robô" (erro já explicado)?
+pub fn is_bot_check(explained: &str) -> bool {
+    explained.contains("robô")
 }
 
 /// O erro (já explicado) vale para qualquer música, não só esta? Aí pular
@@ -289,6 +310,13 @@ pub fn looks_outdated(stderr: &str) -> bool {
     ]
         .iter()
         .any(|k| lower.contains(k))
+}
+
+/// Por qual família de endereço o yt-dlp pede (e o download segue).
+#[derive(Clone, Copy, PartialEq)]
+enum Ip {
+    V4,
+    V6,
 }
 
 pub struct YtDlp {
@@ -322,7 +350,7 @@ impl YtDlp {
     pub fn resolve(&self, video_id: &str, account: Option<&Account>) -> Result<Resolved, (String, bool)> {
         if let Some(account) = account {
             match CookieFile::write(account) {
-                Ok(file) => match self.run(video_id, Some(ACCOUNT_CLIENT), ACCOUNT_FORMAT, Some(&file.0)) {
+                Ok(file) => match self.run(video_id, Some(ACCOUNT_CLIENT), ACCOUNT_FORMAT, Some(&file.0), Ip::V4) {
                     Ok(r) => return Ok(r),
                     Err((error, outdated)) if error.contains("indisponível") => return Err((error, outdated)),
                     Err((error, _)) => log::info!("{video_id}: com a conta falhou ({error}); tentando sem"),
@@ -330,27 +358,46 @@ impl YtDlp {
                 Err(error) => log::warn!("arquivo de cookies do yt-dlp: {error}"),
             }
         }
-        match self.resolve_with(video_id, Some(FAST_CLIENT)) {
+        let first = match self.resolve_with(video_id, Some(FAST_CLIENT)) {
+            Ok(r) => return Ok(r),
+            Err((error, outdated)) if error.contains("indisponível") => return Err((error, outdated)),
+            Err(e) => e,
+        };
+        log::info!("{video_id}: o cliente {FAST_CLIENT} falhou ({}); tentando o padrão", first.0);
+        let error = match self.resolve_with(video_id, None) {
+            Ok(r) => return Ok(r),
+            Err(e) => e,
+        };
+        if !is_bot_check(&first.0) && !is_bot_check(&error.0) {
+            return Err(error);
+        }
+        // O "não é um robô" depende do cliente e do endereço: o embutido
+        // costuma passar, e o IPv6 (um por casa) também, quando o IPv4 é
+        // dividido com a vizinhança (CGNAT, comum nos provedores).
+        log::info!("{video_id}: o YouTube pediu o \"não é um robô\"; tentando o {EMBED_CLIENT} e o IPv6");
+        if let Ok(r) = self.run(video_id, Some(EMBED_CLIENT), FORMAT, None, Ip::V4) {
+            return Ok(r);
+        }
+        match self.run(video_id, Some(FAST_CLIENT), FORMAT, None, Ip::V6) {
             Ok(r) => Ok(r),
-            Err((error, outdated)) if error.contains("indisponível") => Err((error, outdated)),
-            Err((error, _)) => {
-                log::info!("{video_id}: o cliente {FAST_CLIENT} falhou ({error}); tentando o padrão");
-                self.resolve_with(video_id, None)
+            Err((ipv6, _)) => {
+                log::info!("{video_id}: pelo IPv6 também não ({ipv6})");
+                Err(if is_bot_check(&first.0) { first } else { error })
             }
         }
     }
 
     pub fn resolve_with(&self, video_id: &str, client: Option<&str>) -> Result<Resolved, (String, bool)> {
-        self.run(video_id, client, FORMAT, None)
+        self.run(video_id, client, FORMAT, None, Ip::V4)
     }
 
-    fn run(&self, video_id: &str, client: Option<&str>, format: &str, cookies: Option<&Path>) -> Result<Resolved, (String, bool)> {
+    fn run(&self, video_id: &str, client: Option<&str>, format: &str, cookies: Option<&Path>, ip: Ip) -> Result<Resolved, (String, bool)> {
         let system_certs = SYSTEM_CERTS.load(Ordering::Relaxed);
-        match self.run_once(video_id, client, format, cookies, system_certs) {
+        match self.run_once(video_id, client, format, cookies, ip, system_certs) {
             Err((_, _, stderr)) if !system_certs && stderr.contains("CERTIFICATE_VERIFY_FAILED") => {
                 log::warn!("yt-dlp: certificado não reconhecido (antivírus ou proxy?); usando o repositório do sistema");
                 SYSTEM_CERTS.store(true, Ordering::Relaxed);
-                self.run_once(video_id, client, format, cookies, true).map_err(|(e, o, _)| (e, o))
+                self.run_once(video_id, client, format, cookies, ip, true).map_err(|(e, o, _)| (e, o))
             }
             other => other.map_err(|(e, o, _)| (e, o)),
         }
@@ -363,6 +410,7 @@ impl YtDlp {
         client: Option<&str>,
         format: &str,
         cookies: Option<&Path>,
+        ip: Ip,
         system_certs: bool,
     ) -> Result<Resolved, (String, bool, String)> {
         let started = std::time::Instant::now();
@@ -393,9 +441,13 @@ impl YtDlp {
             // padrão do sistema; o teto da chamada inteira é `RESOLVE_LIMIT`.
             "--socket-timeout",
             "15",
-            // O endereço vale só para o IP que o pediu; o download também
-            // sai por IPv4 (nesta máquina o IPv6 nem conecta).
-            "--force-ipv4",
+            // O endereço vale só para o IP que o pediu; o download sai pela
+            // mesma família (`Resolved::ipv6`). IPv4 primeiro: nesta máquina
+            // o IPv6 nem conecta.
+            match ip {
+                Ip::V4 => "--force-ipv4",
+                Ip::V6 => "--force-ipv6",
+            },
             "-f",
             format,
             "--print",
@@ -421,9 +473,10 @@ impl YtDlp {
             (true, Some(line)) => {
                 let resolved = parse_printed(line).map_err(|e| (e, false, String::new()))?;
                 log::info!(
-                    "resolvido {video_id} ({}{}, formato {}) em {} ms",
+                    "resolvido {video_id} ({}{}{}, formato {}) em {} ms",
                     client.unwrap_or("padrão"),
                     if cookies.is_some() { " com a conta" } else { "" },
+                    if ip == Ip::V6 { ", IPv6" } else { "" },
                     resolved.format_id.as_deref().unwrap_or("?"),
                     started.elapsed().as_millis()
                 );
@@ -525,11 +578,15 @@ fn swap_in(managed: &Path, name: &str, zip: &[u8], exe: &str) -> Result<PathBuf,
 /// `SHA2-256SUMS` dela e troca a pasta inteira. A versão em pasta abre em
 /// ~1 s; a de arquivo único se descompacta a cada chamada (3,9 s medidos).
 pub fn install(managed: &Path) -> Result<YtDlp, String> {
+    install_from(managed, REPO)
+}
+
+fn install_from(managed: &Path, repo: &str) -> Result<YtDlp, String> {
     let http = http()?;
     // Pela tag, não por `latest/download`: o zip e a versão gravada são
     // garantidamente da mesma release.
-    let tag = latest_tag(&http, REPO)?;
-    let base = format!("https://github.com/{REPO}/releases/download/{tag}");
+    let tag = latest_tag(&http, repo)?;
+    let base = format!("https://github.com/{repo}/releases/download/{tag}");
     let sums = String::from_utf8(get(&http, &format!("{base}/SHA2-256SUMS"))?).map_err(|_| "SHA2-256SUMS ilegível".to_string())?;
     let expected = checksum_for(&sums, ZIP).ok_or("o SHA2-256SUMS não lista o zip")?.to_owned();
     let zip = get(&http, &format!("{base}/{ZIP}"))?;
@@ -539,24 +596,36 @@ pub fn install(managed: &Path) -> Result<YtDlp, String> {
     }
     let target = swap_in(managed, "yt-dlp", &zip, EXE)?;
     let _ = std::fs::write(target.join(VERSION_FILE), &tag);
+    let _ = std::fs::write(target.join(CHANNEL_FILE), repo);
     let _ = std::fs::write(target.join(CHECKED_FILE), "");
-    log::info!("yt-dlp {tag} instalado em {}", target.display());
+    log::info!("yt-dlp {tag} ({repo}) instalado em {}", target.display());
     Ok(YtDlp { exe: target.join(EXE), deno_dir: managed.join("deno") })
 }
 
-/// A versão instalada é a última? Se não, instala a nova. `Ok(None)`: já
-/// era a última. Só vale para o yt-dlp gerenciado.
-pub fn update(managed: &Path) -> Result<Option<YtDlp>, String> {
+/// A versão instalada é a última do canal dela? Se não, instala a nova.
+/// `after_error`: o YouTube recusou com cara de yt-dlp velho; se a estável
+/// instalada já é a mais nova, passa para os builds noturnos. `Ok(None)`:
+/// já era a última. Só vale para o yt-dlp gerenciado.
+pub fn update(managed: &Path, after_error: bool) -> Result<Option<YtDlp>, String> {
     let dir = managed.join("yt-dlp");
     let installed = std::fs::read_to_string(dir.join(VERSION_FILE)).unwrap_or_default();
-    let latest = latest_tag(&http()?, REPO)?;
+    let installed = installed.trim();
+    let channel = std::fs::read_to_string(dir.join(CHANNEL_FILE)).unwrap_or_default();
+    let http = http()?;
+    let mut repo = if channel.trim() == NIGHTLY_REPO { NIGHTLY_REPO } else { REPO };
+    let mut latest = latest_tag(&http, repo)?;
     let _ = std::fs::write(dir.join(CHECKED_FILE), "");
-    if installed.trim() == latest {
+    if after_error && repo == REPO && installed == latest {
+        repo = NIGHTLY_REPO;
+        latest = latest_tag(&http, repo)?;
+        log::info!("yt-dlp: a estável {installed} já é a mais nova; tentando a noturna {latest}");
+    }
+    if installed == latest {
         log::info!("yt-dlp {latest} já é o mais novo");
         return Ok(None);
     }
-    log::info!("yt-dlp: instalado {:?}, saiu {latest}", installed.trim());
-    install(managed).map(Some)
+    log::info!("yt-dlp: instalado {installed:?}, saiu {latest} ({repo})");
+    install_from(managed, repo).map(Some)
 }
 
 /// A consulta diária já passou do prazo? (Sem a marca, também.)
@@ -669,17 +738,24 @@ mod tests {
         assert_eq!(r.user_agent.as_deref(), Some("Mozilla/5.0 X"));
         assert!(r.fresh(1_793_260_861 - 3600));
         assert!(!r.fresh(1_793_260_861 - 60));
+        assert!(!r.ipv6());
+        let v6 = Resolved { url: "https://rr1.googlevideo.com/videoplayback?ip=2804%3A14c%3A1%3A%3A1&expire=1".into(), ..r.clone() };
+        assert!(v6.ipv6());
+        let v4 = Resolved { url: "https://rr1.googlevideo.com/videoplayback?ip=177.10.2.3&expire=1".into(), ..r };
+        assert!(!v4.ipv6());
     }
 
     #[test]
     fn errors_are_explained_in_portuguese() {
         let bot = "WARNING: x\nERROR: [youtube] abc: Sign in to confirm you're not a bot. Use --cookies";
-        assert_eq!(explain(bot), "o YouTube pediu para confirmar que não é um robô");
+        assert!(explain(bot).starts_with("o YouTube pediu para confirmar que não é um robô"));
         assert!(explain("ERROR: [youtube] abc: Video unavailable").contains("indisponível"));
         assert!(looks_outdated("ERROR: Unable to extract nsig function; please report this issue"));
         assert!(looks_outdated(bot));
         assert!(!looks_outdated("ERROR: [youtube] abc: Video unavailable"));
         assert!(affects_every_song(&explain(bot)));
+        assert!(is_bot_check(&explain(bot)));
+        assert!(!is_bot_check(&explain("ERROR: [youtube] abc: Video unavailable")));
         assert!(!affects_every_song(&explain("ERROR: [youtube] abc: Video unavailable")));
         let cert = "ERROR: [youtube] abc: Unable to download webpage: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain>";
         assert!(explain(cert).contains("interceptada"));
@@ -713,8 +789,13 @@ mod tests {
     fn manutencao_live() {
         let dir = PathBuf::from(std::env::var_os("MUSICFAST_TMP").expect("MUSICFAST_TMP"));
         let y = install(&dir).expect("instalar");
-        assert!(update(&dir).expect("consultar").is_none());
+        assert!(update(&dir, false).expect("consultar").is_none());
         assert!(!update_due(&dir));
+        // Depois de um erro com a estável já na última: vai para a noturna, e
+        // a consulta diária segue nela.
+        let y = update(&dir, true).expect("noturna").expect("instalou a noturna");
+        assert_eq!(std::fs::read_to_string(dir.join("yt-dlp").join(CHANNEL_FILE)).unwrap(), NIGHTLY_REPO);
+        assert!(update(&dir, false).expect("consultar a noturna").is_none());
         // Sem Deno no PATH, para baixar o gerenciado.
         // SAFETY: este teste roda sozinho (`--ignored manutencao`).
         unsafe { std::env::set_var("PATH", std::env::var_os("SystemRoot").map(|r| PathBuf::from(r).join("System32")).unwrap_or_default()) };

@@ -39,6 +39,21 @@ pub fn http_client() -> reqwest::blocking::Client {
         .expect("cliente HTTP")
 }
 
+/// O cliente para um endereço pedido por IPv6 (`Resolved::ipv6`): o de
+/// `http_client` sai só por IPv4. Criado na primeira vez que precisa.
+fn ipv6_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .local_address(Some(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)))
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(90))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .expect("cliente HTTP")
+    })
+}
+
 pub enum FetchError {
     /// 403/410: o endereço venceu ou é de outro IP. Resolver de novo.
     Expired,
@@ -83,6 +98,7 @@ pub fn fetch(http: &reqwest::blocking::Client, r: &Resolved) -> Result<Audio, Fe
 /// a cada pedaço: o download para ouvir sem internet mostra o progresso.
 pub fn fetch_with(http: &reqwest::blocking::Client, r: &Resolved, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<Audio, FetchError> {
     let started = std::time::Instant::now();
+    let http = if r.ipv6() { ipv6_client() } else { http };
     // O endereço do cliente de TV leva 403 até o `available_at` (o yt-dlp
     // dorme o mesmo tempo antes de baixar). Teto de 10 s: além disso, a
     // espera é o defeito, e o 403 manda resolver de novo.

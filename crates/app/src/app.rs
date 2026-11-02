@@ -25,6 +25,9 @@ use crate::ui::player::{self, Tab};
 use crate::ui::side::{self, LyricsState};
 use crate::ui::{Action, Cx, Dialog, Me, PageState, Side, View, dialog, kit, mini, page, play_command, theme};
 
+/// Quanto o mouse fica parado numa música antes de o player resolvê-la.
+const WARM_DWELL: Duration = Duration::from_millis(400);
+
 /// O mini player aberto.
 struct Mini {
     lyrics: bool,
@@ -98,6 +101,11 @@ pub struct MusicApp {
     related: HashMap<String, PageState>,
     bar: BarState,
     warmed: Option<String>,
+    /// A música sob o mouse e desde quando. Só depois de `WARM_DWELL` parado
+    /// nela o player resolve: passar o mouse por uma lista resolvia cada
+    /// linha, dezenas de pedidos por minuto, e o YouTube respondia pedindo
+    /// para confirmar que não é um robô.
+    hovering: Option<(String, Instant)>,
     me: Me,
     dialog: Option<Dialog>,
     expanded: bool,
@@ -293,6 +301,7 @@ impl MusicApp {
             discord_settings: saved.discord.clone(),
             discord_sent: None,
             warmed: None,
+            hovering: None,
             toast: None,
             last_notice: 0,
             controls: Some(controls),
@@ -403,9 +412,23 @@ impl MusicApp {
                 None => self.say(ctx, t().nothing_to_play),
             },
             Action::Warm(video_id) => {
-                if self.warmed.as_deref() != Some(&video_id) {
-                    self.player.send(Command::Warm(video_id.clone()));
-                    self.warmed = Some(video_id);
+                if self.warmed.as_deref() == Some(&video_id) {
+                    return;
+                }
+                match &self.hovering {
+                    Some((id, since)) if *id == video_id => {
+                        if since.elapsed() >= WARM_DWELL {
+                            self.player.send(Command::Warm(video_id.clone()));
+                            self.warmed = Some(video_id);
+                            self.hovering = None;
+                        } else {
+                            ctx.request_repaint_after(WARM_DWELL - since.elapsed());
+                        }
+                    }
+                    _ => {
+                        self.hovering = Some((video_id, Instant::now()));
+                        ctx.request_repaint_after(WARM_DWELL);
+                    }
                 }
             }
             Action::MoreSections => {
