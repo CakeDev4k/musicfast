@@ -28,7 +28,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -99,6 +99,12 @@ const ACCOUNT_FORMAT: &str = "141/140/bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]
 /// O `visionos` ignora cookies (medido em 29/10/2026: um cookie falso não
 /// muda nada nele); o `tv` os usa.
 const ACCOUNT_CLIENT: &str = "tv";
+/// Um antivírus que inspeciona HTTPS (Kaspersky, Avast, ESET) ou o proxy de
+/// uma empresa assina as conexões com um certificado que só o Windows
+/// conhece. O catálogo (reqwest, pelo repositório do sistema) passa; o
+/// yt-dlp, com o pacote `certifi` dele, leva CERTIFICATE_VERIFY_FAILED em
+/// toda música. Visto uma vez, ele passa a usar o repositório do sistema.
+static SYSTEM_CERTS: AtomicBool = AtomicBool::new(false);
 
 /// A conta para o yt-dlp: o cabeçalho de cookies e a pasta (do usuário,
 /// fora do log) onde o arquivo temporário de cookies é escrito.
@@ -245,13 +251,25 @@ pub fn explain(stderr: &str) -> String {
         "o YouTube não ofereceu áudio AAC para esta música".into()
     } else if lower.contains("age") && lower.contains("confirm") {
         "música com restrição de idade (precisa de login)".into()
-    } else if lower.contains("unable to download") || lower.contains("timed out") || lower.contains("getaddrinfo") {
+    } else if lower.contains("certificate_verify_failed") || lower.contains("certificate verify failed") {
+        "a conexão com o YouTube foi interceptada (antivírus ou proxy com certificado próprio)".into()
+    } else if lower.contains("http error 429") || lower.contains("too many requests") {
+        "o YouTube limitou os pedidos desta rede; tente de novo em alguns minutos".into()
+    } else if lower.contains("unable to download") || lower.contains("timed out") || lower.contains("getaddrinfo") || lower.contains("proxy") {
         "sem conexão com o YouTube".into()
     } else if last.is_empty() {
         "o yt-dlp falhou sem dizer por quê".into()
     } else {
         last.trim_start_matches("ERROR:").trim().chars().take(160).collect()
     }
+}
+
+/// O erro (já explicado) vale para qualquer música, não só esta? Aí pular
+/// para a próxima só repete o erro.
+pub fn affects_every_song(explained: &str) -> bool {
+    ["robô", "sem conexão", "interceptada", "limitou", "não abriu", "bloqueado", "demorou demais", "falhou sem dizer"]
+        .iter()
+        .any(|k| explained.contains(k))
 }
 
 /// O erro sugere que o yt-dlp envelheceu (o YouTube mudou o site)?
@@ -327,6 +345,26 @@ impl YtDlp {
     }
 
     fn run(&self, video_id: &str, client: Option<&str>, format: &str, cookies: Option<&Path>) -> Result<Resolved, (String, bool)> {
+        let system_certs = SYSTEM_CERTS.load(Ordering::Relaxed);
+        match self.run_once(video_id, client, format, cookies, system_certs) {
+            Err((_, _, stderr)) if !system_certs && stderr.contains("CERTIFICATE_VERIFY_FAILED") => {
+                log::warn!("yt-dlp: certificado não reconhecido (antivírus ou proxy?); usando o repositório do sistema");
+                SYSTEM_CERTS.store(true, Ordering::Relaxed);
+                self.run_once(video_id, client, format, cookies, true).map_err(|(e, o, _)| (e, o))
+            }
+            other => other.map_err(|(e, o, _)| (e, o)),
+        }
+    }
+
+    /// Uma chamada do yt-dlp. O erro leva também o stderr original.
+    fn run_once(
+        &self,
+        video_id: &str,
+        client: Option<&str>,
+        format: &str,
+        cookies: Option<&Path>,
+        system_certs: bool,
+    ) -> Result<Resolved, (String, bool, String)> {
         let started = std::time::Instant::now();
         let mut cmd = Command::new(&self.exe);
         // O yt-dlp procura o Deno no PATH: o gerenciado vai na frente.
@@ -342,6 +380,9 @@ impl YtDlp {
         }
         if let Some(file) = cookies {
             cmd.arg("--cookies").arg(file);
+        }
+        if system_certs {
+            cmd.args(["--compat-options", "no-certifi"]);
         }
         cmd.args([
             "--no-warnings",
@@ -365,16 +406,20 @@ impl YtDlp {
         let out = crate::job::output(cmd, RESOLVE_LIMIT).map_err(|e| match e.kind() {
             std::io::ErrorKind::TimedOut => {
                 log::warn!("yt-dlp travou em {video_id} e foi encerrado depois de {} s", RESOLVE_LIMIT.as_secs());
-                ("o yt-dlp demorou demais e foi encerrado".to_owned(), false)
+                ("o yt-dlp demorou demais e foi encerrado".to_owned(), false, String::new())
             }
-            _ => (format!("o yt-dlp não abriu: {e}"), false),
+            // O antivírus que bloqueia o executável costuma responder assim.
+            std::io::ErrorKind::PermissionDenied => {
+                (format!("o yt-dlp foi bloqueado (antivírus?): {e}"), false, String::new())
+            }
+            _ => (format!("o yt-dlp não abriu: {e}"), false, String::new()),
         })?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         let line = stdout.lines().rev().find(|l| l.trim_start().starts_with('{'));
         match (out.status.success(), line) {
             (true, Some(line)) => {
-                let resolved = parse_printed(line).map_err(|e| (e, false))?;
+                let resolved = parse_printed(line).map_err(|e| (e, false, String::new()))?;
                 log::info!(
                     "resolvido {video_id} ({}{}, formato {}) em {} ms",
                     client.unwrap_or("padrão"),
@@ -386,7 +431,7 @@ impl YtDlp {
             }
             _ => {
                 log::warn!("yt-dlp falhou em {video_id}: {}", stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | "));
-                Err((explain(&stderr), looks_outdated(&stderr)))
+                Err((explain(&stderr), looks_outdated(&stderr), stderr.into_owned()))
             }
         }
     }
@@ -634,6 +679,12 @@ mod tests {
         assert!(looks_outdated("ERROR: Unable to extract nsig function; please report this issue"));
         assert!(looks_outdated(bot));
         assert!(!looks_outdated("ERROR: [youtube] abc: Video unavailable"));
+        assert!(affects_every_song(&explain(bot)));
+        assert!(!affects_every_song(&explain("ERROR: [youtube] abc: Video unavailable")));
+        let cert = "ERROR: [youtube] abc: Unable to download webpage: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain>";
+        assert!(explain(cert).contains("interceptada"));
+        assert!(affects_every_song(&explain(cert)));
+        assert!(affects_every_song(&explain("ERROR: [youtube] abc: HTTP Error 429: Too Many Requests")));
     }
 
     /// Contra o YouTube: os dois caminhos resolvem e o endereço baixa.

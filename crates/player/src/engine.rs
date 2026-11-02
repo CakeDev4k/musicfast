@@ -224,6 +224,10 @@ const BYTES_BUDGET: usize = 48 * 1024 * 1024;
 /// Quantos pânicos o laço do player aguenta (`Engine::turn`) antes de
 /// desistir: um defeito que quebra toda volta pararia aqui, não num laço.
 const MAX_PANICS: u32 = 20;
+/// Sem nenhum yt-dlp, quanto esperar entre uma instalação que falhou e a
+/// próxima tentativa. Antes não havia próxima: a falha valia até reabrir o
+/// app, e a música seguinte ficava em "Preparando o yt-dlp" para sempre.
+const INSTALL_RETRY: Duration = Duration::from_secs(60);
 
 struct Engine {
     rx: Receiver<Msg>,
@@ -249,6 +253,7 @@ struct Engine {
     ytdlp: Option<Arc<YtDlp>>,
     installing: bool,
     tried_update: bool,
+    install_failed_at: Option<Instant>,
 
     resolved: HashMap<String, Resolved>,
     resolving: HashSet<String>,
@@ -331,6 +336,7 @@ impl Engine {
             ytdlp,
             installing: false,
             tried_update: false,
+            install_failed_at: None,
             resolved,
             resolving: HashSet::new(),
             retried: HashSet::new(),
@@ -957,6 +963,19 @@ impl Engine {
         }
     }
 
+    /// Uma falha que não é da música (sem yt-dlp, sem conexão, o YouTube
+    /// pedindo login): pular para a próxima só repetiria o erro mais duas
+    /// vezes, com a pessoa olhando o carregando. Para aqui, com o aviso.
+    fn fail_here(&mut self, error: String) {
+        let title = self.index.and_then(|i| self.queue.get(i)).map(|t| t.title.clone()).unwrap_or_default();
+        self.want = None;
+        self.say(if title.is_empty() { error } else { format!("{title}: {error}") });
+        self.status = if self.index.is_some() { Status::Paused } else { Status::Idle };
+        self.step = None;
+        self.restore_at = Some(self.shared.position_ms.load(Ordering::Relaxed) as f64 / 1000.0);
+        self.pause_output();
+    }
+
     /// Garante que os bytes de `video_id` estão vindo.
     fn need(&mut self, video_id: &str) {
         if self.bytes.iter().any(|(id, _)| id == video_id)
@@ -975,7 +994,14 @@ impl Engine {
     }
 
     fn resolve(&mut self, video_id: &str) {
-        let Some(ytdlp) = self.ytdlp_or_install() else { return };
+        let Some(ytdlp) = self.ytdlp_or_install() else {
+            // Sem yt-dlp e sem instalação a caminho, ninguém levaria a música
+            // adiante: ela ficaria carregando para sempre.
+            if !self.installing && self.is_wanted(video_id) {
+                self.fail_here(musicfast_i18n::t().ytdlp_unavailable.into());
+            }
+            return;
+        };
         self.resolving.insert(video_id.to_owned());
         let video_id = video_id.to_owned();
         let account = self.account.clone();
@@ -988,7 +1014,13 @@ impl Engine {
 
     fn ytdlp_or_install(&mut self) -> Option<Arc<YtDlp>> {
         let managed = self.ytdlp.as_ref().is_some_and(|y| y.is_managed(&self.bin_dir));
-        if !managed && !self.installing && !self.tried_update {
+        // Com o do PATH, uma tentativa por abertura; sem nenhum, de novo
+        // depois de `INSTALL_RETRY` (a rede ou o antivírus podem ter voltado).
+        let may_try = match self.ytdlp {
+            Some(_) => !self.tried_update,
+            None => self.install_failed_at.is_none_or(|at| at.elapsed() >= INSTALL_RETRY),
+        };
+        if !managed && !self.installing && may_try {
             self.spawn_install();
         }
         self.ytdlp.clone()
@@ -1036,10 +1068,14 @@ impl Engine {
     fn on_installed(&mut self, result: Result<YtDlp, String>) {
         self.installing = false;
         match result {
-            Ok(y) => self.ytdlp = Some(Arc::new(y)),
+            Ok(y) => {
+                self.install_failed_at = None;
+                self.ytdlp = Some(Arc::new(y));
+            }
             Err(error) => {
-                // Não tentar de novo a cada música: na próxima abertura.
+                // Não tentar de novo a cada música (`ytdlp_or_install`).
                 self.tried_update = true;
+                self.install_failed_at = Some(Instant::now());
                 if self.ytdlp.is_none() {
                     self.say(musicfast_i18n::t().ytdlp_install_failed(&error.to_string()));
                     if self.want.is_some() {
@@ -1107,6 +1143,15 @@ impl Engine {
                 }
             }
             Err((error, outdated)) => {
+                if self.ytdlp.as_ref().is_some_and(|y| !y.exe.is_file()) && !self.installing {
+                    // O yt-dlp sumiu (um antivírus o pôs em quarentena, alguém
+                    // apagou a pasta): instala de novo e a música espera.
+                    log::warn!("o yt-dlp sumiu de onde estava; instalando de novo");
+                    self.ytdlp = None;
+                    self.install_failed_at = None;
+                    self.spawn_install();
+                    return;
+                }
                 if outdated && !self.tried_update && !self.installing {
                     // O YouTube mudou e o yt-dlp envelheceu: atualiza e tenta
                     // de novo uma vez (como o Download de Mídias faz).
@@ -1115,7 +1160,11 @@ impl Engine {
                     return;
                 }
                 if self.is_wanted(&video_id) {
-                    self.fail_current(error);
+                    if ytdlp::affects_every_song(&error) {
+                        self.fail_here(error);
+                    } else {
+                        self.fail_current(error);
+                    }
                 } else {
                     log::info!("pré-resolução de {video_id} falhou: {error}");
                 }
@@ -1260,8 +1309,8 @@ impl Engine {
         }
         let watch = match result {
             Ok(w) if !w.tracks.is_empty() => w,
-            Ok(_) => return self.say(musicfast_i18n::t().queue_not_built.into()),
-            Err(e) => return self.say(musicfast_i18n::t().queue_error(&e.to_string())),
+            Ok(_) => return self.queue_failed(musicfast_i18n::t().queue_not_built.into()),
+            Err(e) => return self.queue_failed(musicfast_i18n::t().queue_error(&e.to_string())),
         };
         self.radio = watch.continuation;
         let current = self.index.and_then(|i| self.queue.get(i)).cloned();
@@ -1286,6 +1335,17 @@ impl Engine {
                 self.reshuffle();
                 self.start(0, 0.0, true);
             }
+        }
+    }
+
+    /// A fila do YouTube não veio. Uma playlist aberta sem música inicial
+    /// (`PlayList` sem semente) esperava por ela em "Montando a fila", e
+    /// ficava assim para sempre.
+    fn queue_failed(&mut self, text: String) {
+        self.say(text);
+        if self.queue.is_empty() && self.status == Status::Loading {
+            self.status = Status::Idle;
+            self.step = None;
         }
     }
 
