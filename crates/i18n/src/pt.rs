@@ -369,6 +369,7 @@ pub static STRINGS: Strings = Strings {
     ytdlp_install_failed: "Não foi possível instalar o yt-dlp: {}",
     ytdlp_already_latest: "já é a versão mais nova",
     audio_url_refused: "o YouTube recusou o endereço do áudio",
+    ytdlp_unavailable: "o yt-dlp não está disponível; tente de novo em um minuto",
     audio_server_answered: "o servidor de áudio respondeu {}",
     download_failed: "download: {}",
     download_interrupted: "download interrompido: {}",

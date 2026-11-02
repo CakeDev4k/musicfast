@@ -373,6 +373,7 @@ pub struct Strings {
     pub(crate) ytdlp_install_failed: &'static str,
     pub ytdlp_already_latest: &'static str,
     pub audio_url_refused: &'static str,
+    pub ytdlp_unavailable: &'static str,
     pub(crate) audio_server_answered: &'static str,
     pub(crate) download_failed: &'static str,
     pub(crate) download_interrupted: &'static str,

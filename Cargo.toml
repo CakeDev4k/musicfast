@@ -19,7 +19,7 @@ serde_json = "1"
 # TLS do Windows (SChannel), não o rustls: o padrão traz o aws-lc, C pesado no
 # binário e na compilação, e o do sistema já está atualizado pelo Windows
 # Update (mesma escolha do prime-services).
-reqwest = { version = "0.13", default-features = false, features = ["native-tls", "blocking", "json", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "blocking", "json", "http2", "system-proxy"] }
 # A mesma tag de fastframe do Produtividade Prime: o Cargo já tem o checkout.
 # Mova todos juntos e leia as notas da release antes.
 fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
