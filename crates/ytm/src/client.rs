@@ -154,7 +154,8 @@ impl Client {
         *self.locale.write().unwrap_or_else(|e| e.into_inner()) = (hl.to_owned(), gl.to_owned());
     }
 
-    fn locale(&self) -> (String, String) {
+    /// O idioma e o país de agora (`hl`, `gl`).
+    pub fn locale(&self) -> (String, String) {
         self.locale.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 

@@ -200,6 +200,7 @@ pub struct Strings {
     /// O item do menu e o título do diálogo do cache.
     pub storage: &'static str,
     pub storage_hint: &'static str,
+    pub storage_songs: &'static str,
     pub storage_lyrics: &'static str,
     pub storage_covers: &'static str,
     pub storage_browser: &'static str,

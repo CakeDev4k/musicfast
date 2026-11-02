@@ -24,6 +24,7 @@ use fastframe_audio::{Maintained, Output, OutputOptions};
 use musicfast_ytm::{Client, Track, Watch};
 use serde::{Deserialize, Serialize};
 
+use crate::disk_cache::DiskCache;
 use crate::render::{Event, Loaded, RCmd, Renderer, Shared};
 use crate::source::{Audio, Decoder, FetchError, fetch, http_client};
 use crate::ytdlp::{self, Resolved, YtDlp, now};
@@ -108,7 +109,14 @@ pub struct Config {
     pub volume: f32,
     /// As músicas baixadas: as que estão aqui tocam do disco, sem internet.
     pub offline: Option<Arc<crate::Offline>>,
+    /// Onde guardar as músicas tocadas (`PLAYED_BUDGET`); `None`, nenhuma.
+    pub played_dir: Option<PathBuf>,
 }
+
+/// O teto das músicas tocadas guardadas em disco: ~80 músicas comuns (1 MB
+/// por minuto em AAC de 128 kbps). Repetida, a música começa em ~10 ms em
+/// vez de ~3 s, e o YouTube recebe um pedido a menos (menos "não é um robô").
+pub const PLAYED_BUDGET: u64 = 300 * 1024 * 1024;
 
 pub(crate) enum Msg {
     Cmd(Command),
@@ -261,6 +269,7 @@ struct Engine {
     bin_dir: PathBuf,
     cache_file: PathBuf,
     offline: Option<Arc<crate::Offline>>,
+    played: Option<Arc<DiskCache>>,
     /// A conta para o yt-dlp, e onde o arquivo de cookies dele é escrito.
     account: Option<ytdlp::Account>,
     cookie_dir: PathBuf,
@@ -356,6 +365,7 @@ impl Engine {
             cookie_dir,
             cache_file: config.cache_file,
             offline: config.offline,
+            played: config.played_dir.map(|dir| Arc::new(DiskCache::new(dir, PLAYED_BUDGET, "m4a"))),
             ytdlp,
             installing: false,
             tried_update: false,
@@ -406,6 +416,12 @@ impl Engine {
         // PATH (winget), em ~3,9 s. Se só existe a segunda, a primeira vem em
         // segundo plano já na primeira música.
         self.spawn_maintenance();
+        if let Some(ytdlp) = self.ytdlp.clone() {
+            answering("aquecer-yt-dlp", self.tx.clone(), None, move || {
+                ytdlp.warm();
+                None
+            });
+        }
         let mut panics = 0;
         loop {
             let msg = match self.timeout() {
@@ -964,7 +980,17 @@ impl Engine {
         };
         let decoder = match Decoder::open(bytes) {
             Ok(d) => d,
-            Err(error) => return self.fail_current(error),
+            Err(error) => {
+                // Um arquivo guardado que estragou: sai do cache e a música
+                // vem de novo do YouTube, em vez de falhar até limpar o cache.
+                if self.played.as_ref().is_some_and(|p| p.forget(&video_id)) {
+                    log::warn!("{video_id}: a cópia guardada não abriu ({error}); baixando de novo");
+                    self.bytes.retain(|(id, _)| *id != video_id);
+                    self.need(&video_id);
+                    return;
+                }
+                return self.fail_current(error);
+            }
         };
         if !self.ensure_output() {
             self.want = None;
@@ -1029,6 +1055,9 @@ impl Engine {
             return;
         }
         if let Some(path) = self.offline.as_ref().and_then(|o| o.path_of(video_id)) {
+            return self.spawn_read(video_id, path);
+        }
+        if let Some(path) = self.played.as_ref().and_then(|p| p.get(video_id)) {
             return self.spawn_read(video_id, path);
         }
         match self.resolved.get(video_id).filter(|r| r.fresh(now())).cloned() {
@@ -1142,9 +1171,15 @@ impl Engine {
     fn spawn_fetch(&mut self, r: Resolved) {
         self.fetching.insert(r.video_id.clone());
         let http = self.http.clone();
+        let played = self.played.clone();
         let failed = Msg::Fetched { video_id: r.video_id.clone(), result: Err(FetchError::Other("erro interno no download".into())) };
         answering("download", self.tx.clone(), Some(failed), move || {
             let result = fetch(&http, &r);
+            // Para o disco em outra thread: a música não espera a escrita.
+            if let (Some(played), Ok(bytes)) = (played, &result) {
+                let (video_id, bytes) = (r.video_id.clone(), bytes.clone());
+                let _ = std::thread::Builder::new().name("guardar-tocada".into()).spawn(move || played.put(&video_id, bytes.as_ref()));
+            }
             Some(Msg::Fetched { video_id: r.video_id, result })
         });
     }
@@ -1278,7 +1313,12 @@ impl Engine {
                 self.armed = Some((video_id, token));
                 self.rcmd(RCmd::Arm(Some(Box::new(Loaded { token, decoder, start_at: 0.0 }))));
             }
-            Err(error) => log::warn!("a próxima ({video_id}) não abre: {error}"),
+            Err(error) => {
+                log::warn!("a próxima ({video_id}) não abre: {error}");
+                if self.played.as_ref().is_some_and(|p| p.forget(&video_id)) {
+                    self.bytes.retain(|(id, _)| *id != video_id);
+                }
+            }
         }
     }
 
@@ -1573,6 +1613,7 @@ mod tests {
             client: Arc::new(Client::new("pt", "BR").unwrap()),
             volume: 1.0,
             offline: None,
+            played_dir: Some(dir.join("tocadas")),
         };
         let snapshot = Arc::new(Mutex::new(Snapshot::default()));
         Engine::new(config, rx, tx, snapshot, Arc::new(AtomicU64::new(0)), Arc::new(Shared::default()), Arc::new(|| {}))
@@ -1621,5 +1662,17 @@ mod tests {
         let mut kept: VecDeque<_> = ["a", "b", "c"].map(|id| song(id, 58)).into();
         trim_kept(&mut kept);
         assert_eq!(kept.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+    }
+
+    #[test]
+    fn a_played_song_comes_from_disk_without_ytdlp() {
+        let mut e = engine("tocada");
+        let played = e.played.clone().expect("cache das tocadas");
+        played.put("abcdefghijk", b"bytes da musica");
+        e.need("abcdefghijk");
+        // Do disco: sem resolver (nada de yt-dlp), lendo o arquivo.
+        assert!(e.fetching.contains("abcdefghijk"));
+        assert!(e.resolving.is_empty());
+        let _ = std::fs::remove_dir_all(played.dir());
     }
 }

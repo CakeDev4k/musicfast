@@ -43,6 +43,7 @@ fn main() {
             client,
             volume: 0.0,
             offline: None,
+            played_dir: None,
         },
         Arc::new(|| {}),
     );

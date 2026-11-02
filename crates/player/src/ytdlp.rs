@@ -406,6 +406,20 @@ impl YtDlp {
         self.exe.starts_with(managed)
     }
 
+    /// Abre o yt-dlp uma vez, à toa, ao abrir o app. A primeira abertura
+    /// depois de ligar o computador leva 3,5 s (o Windows e o antivírus leem
+    /// os ~80 arquivos dele); as seguintes, 0,74 s (medido em 02/11/2026).
+    /// Sem isto, quem pagava a primeira era a primeira música.
+    pub fn warm(&self) {
+        let started = Instant::now();
+        let mut cmd = Command::new(&self.exe);
+        cmd.arg("--version");
+        match crate::job::output(cmd, Duration::from_secs(30)) {
+            Ok(_) => log::info!("yt-dlp aquecido em {} ms", started.elapsed().as_millis()),
+            Err(error) => log::info!("aquecer o yt-dlp: {error}"),
+        }
+    }
+
     /// Tenta os jeitos (`strategy::Way`) na ordem aprendida até um acertar.
     /// Um erro da música ou da rede para na hora (os outros dariam no
     /// mesmo); um erro do jeito passa ao seguinte. Se o da vez demora mais

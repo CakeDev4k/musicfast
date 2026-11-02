@@ -1,6 +1,7 @@
 //! Tocar YouTube Music: resolver (yt-dlp), baixar (reqwest), decodificar
 //! (Symphonia) e tocar (fastframe-audio), com a fila e o rádio do site.
 
+pub mod disk_cache;
 pub mod engine;
 mod job;
 pub mod m4a;
